@@ -23,6 +23,7 @@ final class WorkerViews {
     static void list(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user) throws Exception {
         ArrayNode routes = Store.routes(db, user, null);
         ArrayNode dailies = Mainline.dailies(db, user, value(user, "today"), null);
+        ArrayNode projects = Mainline.supervisedProjects(db, user);
         StringBuilder cards = new StringBuilder();
         int count = 0, submitted = 0;
         for (JsonNode route : routes) {
@@ -53,8 +54,21 @@ final class WorkerViews {
         page(res, user, "My route", "<div class='worker'><header class='worker-route-header'><p class='eyebrow'>" + h(day) +
             "</p><div class='worker-section-title'><h1>My route</h1>" + link("Refresh route", "/", "btn secondary") +
             "</div></header>" + (param(req,"saved").equals("1") ? notice("Report saved.") : "") +
-            progress + cards + (dailies.isEmpty() ? "" : "<section class='stack'><h2>Mainline dailies</h2>" +
+            supervisedProjects(projects) + progress + cards + (dailies.isEmpty() ? "" : "<section class='stack'><h2>Mainline dailies</h2>" +
             MainlineViews.dailyCards(dailies) + "</section>") + "</div>");
+    }
+
+    private static String supervisedProjects(ArrayNode projects) {
+        if (projects.isEmpty()) return "";
+        var cards = new StringBuilder("<section class='stack'><h2>Projects I supervise</h2>");
+        for (JsonNode project : projects) {
+            String location = value(project, "location");
+            cards.append("<a class='panel route-section' href='").append(MainlineViews.projectPath(project))
+                .append("'><strong>").append(h(value(project, "name"))).append("</strong><span>")
+                .append(h(value(project, "state"))).append(location.isEmpty() ? "" : " · " + h(location))
+                .append("</span></a>");
+        }
+        return cards.append("</section>").toString();
     }
 
     private static String urgentLink(JsonNode jobs) {

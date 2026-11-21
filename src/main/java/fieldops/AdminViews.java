@@ -533,11 +533,16 @@ final class AdminViews {
     }
 
     static String contractorPicker(ArrayNode people, ObjectNode d, String query) {
+        return contractorPicker(people, d, query, true);
+    }
+
+    static String contractorPicker(ArrayNode people, ObjectNode d, String query, boolean admin) {
         if (query.length() > 250) throw new Problem(422, "Enter a shorter contractor name.");
         query = query.strip();
         StringBuilder out = new StringBuilder("<fieldset id='contractors' class='stack'><legend>Subcontractors</legend>");
         if (people.isEmpty())
-            return out.append(link("Add a subcontractor", "/people/new", "text-button")).append("</fieldset>").toString();
+            return out.append(admin ? link("Add a subcontractor", "/people/new", "text-button") :
+                "<p>No additional contractors available.</p>").append("</fieldset>").toString();
         out.append("<div class='contractor-search'>")
             .append(field("Search contractors", "contractor_search", query,
                 "type='search' list='contractor-names' placeholder='First or last name' maxlength='250' autocomplete='off' enterkeyhint='search'"))
@@ -550,16 +555,31 @@ final class AdminViews {
         var crew = new StringBuilder();
         var matches = new StringBuilder();
         var terms = searchText(query).split("\\s+");
+        var duplicateNames = new LinkedHashSet<String>();
+        if (!admin) {
+            var seen = new LinkedHashSet<String>();
+            for (JsonNode person : people) {
+                String name = searchText(value(person, "name"));
+                if (!seen.add(name)) duplicateNames.add(name);
+            }
+        }
         for (JsonNode person : people) {
             String key = value(person, "id"), name = value(person, "name"), role = value(person, "role");
             String username = value(person, "username");
             boolean onTeam = selected.contains(key);
             suggestions.append("<option value='").append(h(name)).append("'></option>");
-            String searchable = searchText(name + " " + username);
+            boolean showUsername = admin || duplicateNames.contains(searchText(name));
+            String searchable = searchText(showUsername ? name + " " + username : name);
             if (!onTeam && !Arrays.stream(terms).allMatch(searchable::contains)) continue;
-            (onTeam ? crew : matches).append("<label><input type='checkbox' name='member' value='").append(h(key))
-                .append(onTeam ? "' checked>" : "'>").append("<span>").append(h(name)).append(" <span class='helper'>· ")
-                .append(h(username)).append(" · ").append(role.isBlank() ? "Role unassigned" : h(role)).append("</span></span></label>");
+            var group = onTeam ? crew : matches;
+            group.append("<label><input type='checkbox' name='member' value='").append(h(key))
+                .append(onTeam ? "' checked>" : "'>").append("<span>").append(h(name));
+            if (showUsername) {
+                group.append(" <span class='helper'>· ").append(h(username));
+                if (admin) group.append(" · ").append(role.isBlank() ? "Role unassigned" : h(role));
+                group.append("</span>");
+            }
+            group.append("</span></label>");
         }
         out.append(suggestions).append("</datalist></div>");
         if (!crew.isEmpty()) out.append("<div><h3>Selected contractors</h3><div class='choices'>").append(crew).append("</div></div>");

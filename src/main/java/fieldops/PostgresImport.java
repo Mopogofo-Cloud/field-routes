@@ -152,7 +152,7 @@ public final class PostgresImport {
         return List.copyOf(ordered);
     }
 
-    private record Column(String name, String type, int keyPosition, boolean identity) {
+    private record Column(String name, String type, int keyPosition, boolean identity, String sourceExpression) {
         boolean integral() { return Set.of("bigint", "integer", "smallint").contains(type); }
     }
 
@@ -172,8 +172,17 @@ public final class PostgresImport {
                 while (rows.next()) {
                     String name = rows.getString(1);
                     Integer key = primaryKeys.remove(name);
+                    String sourceExpression = quote(name);
+                    // Legacy SQLite projects used display text only. A historical crew assignment was explicit.
+                    if (key == null && table.equals("mainline_projects") && name.equals("supervisor_person_id")) {
+                        key = 0;
+                        sourceExpression = "NULL";
+                    } else if (key == null && table.equals("mainline_daily_members") && name.equals("supervisor_only")) {
+                        key = 0;
+                        sourceExpression = "0";
+                    }
                     check(key != null, "Source is missing " + table + "." + name + ". Upgrade a backup of the source first.");
-                    result.add(new Column(name, rows.getString(2), key, rows.getString(3).equals("YES")));
+                    result.add(new Column(name, rows.getString(2), key, rows.getString(3).equals("YES"), sourceExpression));
                 }
             }
         }
@@ -185,7 +194,7 @@ public final class PostgresImport {
     private static void copyRows(Connection source, Connection target, String table, List<Column> columns) throws SQLException {
         String names = columnNames(columns);
         String placeholders = String.join(",", java.util.Collections.nCopies(columns.size(), "?"));
-        try (var read = source.createStatement(); var rows = read.executeQuery("SELECT " + names + " FROM " + quote(table));
+        try (var read = source.createStatement(); var rows = read.executeQuery("SELECT " + sourceNames(columns) + " FROM " + quote(table));
              var insert = target.prepareStatement("INSERT INTO " + qualified(table) + " (" + names + ") VALUES (" + placeholders + ")")) {
             int batchSize = columns.stream().anyMatch(c -> c.type.equals("bytea")) ? 1 : 256;
             int pending = 0;
@@ -229,7 +238,7 @@ public final class PostgresImport {
         String names = columnNames(columns);
         var keys = columns.stream().filter(c -> c.keyPosition > 0)
             .sorted(java.util.Comparator.comparingInt(Column::keyPosition)).toList();
-        String sqlite = "SELECT " + names + " FROM " + quote(table) + " ORDER BY " + keyOrder(keys, "BINARY");
+        String sqlite = "SELECT " + sourceNames(columns) + " FROM " + quote(table) + " ORDER BY " + keyOrder(keys, "BINARY");
         String postgres = "SELECT " + names + " FROM " + qualified(table) + " ORDER BY " + keyOrder(keys, "\"C\"");
         long count = 0;
         try (var left = source.createStatement(); var right = target.createStatement()) {
@@ -256,6 +265,10 @@ public final class PostgresImport {
 
     private static String columnNames(List<Column> columns) {
         return String.join(",", columns.stream().map(c -> quote(c.name)).toList());
+    }
+
+    private static String sourceNames(List<Column> columns) {
+        return String.join(",", columns.stream().map(Column::sourceExpression).toList());
     }
 
     private static Object value(ResultSet row, int index, Column column) throws SQLException {

@@ -67,8 +67,8 @@ public final class Store {
         return rows(db, PROFILES + " ORDER BY name,id");
     }
 
-    static ArrayNode contractorNames(Connection db) throws SQLException {
-        return rows(db, "SELECT DISTINCT name FROM people WHERE is_admin=0 ORDER BY name");
+    static ArrayNode contractorAccounts(Connection db) throws SQLException {
+        return rows(db, "SELECT id,name,username FROM people WHERE is_admin=0 ORDER BY name,id");
     }
 
     public static ObjectNode saveProfile(Connection db, ObjectNode input, Long id) throws Exception {

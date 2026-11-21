@@ -51,6 +51,41 @@ final class Mainline {
         return transaction(db, false, () -> readProject(db,id));
     }
 
+    static ArrayNode supervisedProjects(Connection db, ObjectNode user) throws SQLException {
+        return rows(db, """
+            SELECT id,name,location,state FROM mainline_projects
+            WHERE supervisor_person_id=? ORDER BY lower(name),id
+            """, user.path("id").asLong());
+    }
+
+    private static ObjectNode dispatchDetails(Connection db, ObjectNode user, long projectId) throws SQLException {
+        String scope = " WHERE id=?";
+        var args = new ArrayList<Object>();
+        args.add(projectId);
+        if (!admin(user)) { scope += " AND supervisor_person_id=?"; args.add(user.path("id").asLong()); }
+        var project = one(db, "SELECT id,name,location,state,supervisor,supervisor_person_id FROM mainline_projects" + scope, args.toArray());
+        if (project == null) throw new Problem(404, "Mainline project not found.");
+        return project;
+    }
+
+    static ObjectNode dispatchProject(Connection db, ObjectNode user, long projectId) throws SQLException {
+        return transaction(db, false, () -> {
+            if (admin(user)) return readProject(db, projectId);
+            var project = dispatchDetails(db, user, projectId);
+            var latest = loadDailies(db, " WHERE d.id=(SELECT id FROM mainline_dailies WHERE project_id=? ORDER BY date DESC,id DESC LIMIT 1)",
+                List.of(projectId), true);
+            project.set("latest_daily", latest.isEmpty() ? null : latest.get(0));
+            return project;
+        });
+    }
+
+    static ArrayNode scheduledDailies(Connection db, ObjectNode user, long projectId) throws SQLException {
+        return transaction(db, false, () -> {
+            dispatchDetails(db, user, projectId);
+            return loadDailies(db, " WHERE d.project_id=? AND d.date>=?", List.of(projectId, Db.today()), true);
+        });
+    }
+
     static ObjectNode readProject(Connection db, long id) throws SQLException {
         var result = one(db, PROJECTS + " WHERE p.id=?", id);
         if (result == null) throw new Problem(404,"Mainline project not found.");
@@ -65,9 +100,11 @@ final class Mainline {
         if (user==null) return false;
         if (admin(user)) return one(db,"SELECT id FROM mainline_projects WHERE id=?",id) != null;
         return one(db,"""
-            SELECT d.id FROM mainline_dailies d JOIN mainline_daily_members m ON m.daily_id=d.id
-            WHERE d.project_id=? AND d.date=? AND m.person_id=? LIMIT 1
-            """,id,Db.today(),user.path("id").asLong()) != null;
+            SELECT p.id FROM mainline_projects p WHERE p.id=? AND (p.supervisor_person_id=? OR EXISTS(
+                SELECT 1 FROM mainline_dailies d JOIN mainline_daily_members m ON m.daily_id=d.id
+                WHERE d.project_id=p.id AND d.date=? AND m.person_id=?
+                  AND (m.supervisor_only=0 OR p.supervisor_person_id=m.person_id)))
+            """,id,user.path("id").asLong(),Db.today(),user.path("id").asLong()) != null;
     }
 
     private static boolean admin(ObjectNode user) { return user.path("is_admin").asBoolean(); }
@@ -98,7 +135,7 @@ final class Mainline {
 
     static ObjectNode saveProject(Connection db, ObjectNode user, Long id, ObjectNode input) throws SQLException {
         requireAdmin(user);
-        StoreInput.fields(input,"name","location","supervisor","state","lunch_provided","estimated_footage",
+        StoreInput.fields(input,"name","location","supervisor","supervisor_person_id","state","lunch_provided","estimated_footage",
             "driver_cost","price_per_foot","due_date","revision");
         String name=StoreInput.text(input,"name",1,240), location=optionalString(input,"location",500),
             supervisor=optionalString(input,"supervisor",240), state=input.path("state").asText("Not Started");
@@ -115,21 +152,47 @@ final class Mainline {
         String due=optionalString(input,"due_date",10);
         String dueDate=due.isEmpty()?null:StoreInput.date(due);
         return transaction(db,true,()->{
+            ObjectNode previous = id == null ? null : one(db, "SELECT supervisor,supervisor_person_id FROM mainline_projects WHERE id=?", id);
+            if (id != null && previous == null) throw new Problem(404,"Mainline project not found.");
+            Long oldSupervisor = previous != null && previous.hasNonNull("supervisor_person_id")
+                ? previous.get("supervisor_person_id").asLong() : null;
+            Long assigned = null;
+            if (input.hasNonNull("supervisor_person_id") && !input.get("supervisor_person_id").asText().isBlank())
+                assigned = StoreInput.integer(input.get("supervisor_person_id"), "supervisor_person_id");
+            else if (!input.has("supervisor_person_id") && previous != null && supervisor.equals(previous.path("supervisor").asText()))
+                assigned = oldSupervisor;
+            String supervisorName = supervisor;
+            if (assigned != null) {
+                var person = one(db, "SELECT name FROM people WHERE id=? AND is_admin=0", assigned);
+                if (person == null) throw new Problem(422, "Select a contractor account for the project supervisor.");
+                supervisorName = person.get("name").asText();
+            }
             long projectId;
             if (id==null) {
                 projectId=insertId(db,"""
-                    INSERT INTO mainline_projects(name,location,supervisor,state,lunch_provided,estimated_hundredths,
-                      driver_cents,price_ten_thousandths,due_date) VALUES(?,?,?,?,?,?,?,?,?)
-                    """,name,location,supervisor,state,provided,estimated,driver,price,dueDate);
+                    INSERT INTO mainline_projects(name,location,supervisor,supervisor_person_id,state,lunch_provided,estimated_hundredths,
+                      driver_cents,price_ten_thousandths,due_date) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,name,location,supervisorName,assigned,state,provided,estimated,driver,price,dueDate);
             } else {
                 projectId=id;
                 long revision=StoreInput.integer(input.get("revision"),"revision");
                 if (change(db,"""
-                    UPDATE mainline_projects SET name=?,location=?,supervisor=?,state=?,lunch_provided=?,estimated_hundredths=?,
+                    UPDATE mainline_projects SET name=?,location=?,supervisor=?,supervisor_person_id=?,state=?,lunch_provided=?,estimated_hundredths=?,
                       driver_cents=?,price_ten_thousandths=?,due_date=?,revision=revision+1 WHERE id=? AND revision=?
-                    """,name,location,supervisor,state,provided,estimated,driver,price,dueDate,id,revision)!=1) {
-                    if (one(db,"SELECT id FROM mainline_projects WHERE id=?",id)==null) throw new Problem(404,"Mainline project not found.");
+                    """,name,location,supervisorName,assigned,state,provided,estimated,driver,price,dueDate,id,revision)!=1) {
                     throw new Problem(409,"This project changed. Reopen it before saving.");
+                }
+                if (!java.util.Objects.equals(oldSupervisor, assigned)) {
+                    String today = Db.today();
+                    change(db, """
+                        DELETE FROM mainline_daily_members WHERE supervisor_only=1 AND is_driver=0 AND daily_id IN
+                            (SELECT id FROM mainline_dailies WHERE project_id=? AND date>=?)
+                        """, projectId, today);
+                    if (assigned != null) change(db, """
+                        INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver,supervisor_only)
+                        SELECT id,?,?,0,1 FROM mainline_dailies WHERE project_id=? AND date>=?
+                        ON CONFLICT (daily_id,person_id) DO NOTHING
+                        """, assigned, supervisorName, projectId, today);
                 }
             }
             return readProject(db,projectId);
@@ -149,10 +212,38 @@ final class Mainline {
         return transaction(db,false,()->loadDailies(db,condition.toString(),args));
     }
 
-    private static final String MEMBER_SCOPE = " AND EXISTS(SELECT 1 FROM mainline_daily_members a WHERE a.daily_id=d.id AND a.person_id=?)";
+    // A former supervisor can still appear as a reported driver. That history does not confer access.
+    private static final String MEMBER_SCOPE = " " + """
+        AND EXISTS(SELECT 1 FROM mainline_daily_members a JOIN mainline_projects owned ON owned.id=d.project_id
+                   WHERE a.daily_id=d.id AND a.person_id=? AND (a.supervisor_only=0 OR owned.supervisor_person_id=a.person_id))
+        """;
 
     static ObjectNode daily(Connection db,ObjectNode user,long id) throws SQLException {
         return transaction(db,false,()->readDaily(db,user,id));
+    }
+
+    static boolean canManageCrew(Connection db, ObjectNode user, long dailyId) throws SQLException {
+        if (admin(user)) return one(db, "SELECT id FROM mainline_dailies WHERE id=?", dailyId) != null;
+        return one(db, """
+            SELECT d.id FROM mainline_dailies d JOIN mainline_projects p ON p.id=d.project_id
+            WHERE d.id=? AND d.date>=? AND p.supervisor_person_id=?
+            """, dailyId, Db.today(), user.path("id").asLong()) != null;
+    }
+
+    static ObjectNode crewDaily(Connection db, ObjectNode user, long dailyId) throws SQLException {
+        return transaction(db, false, () -> readCrewDaily(db,user,dailyId));
+    }
+
+    private static void requireCrewManagement(Connection db, ObjectNode user, long dailyId) throws SQLException {
+        if (!canManageCrew(db,user,dailyId)) {
+            if (admin(user)) throw new Problem(404, "Mainline daily not found.");
+            throw new Problem(403, "You can manage crews on your assigned projects for today and upcoming work dates.");
+        }
+    }
+
+    private static ObjectNode readCrewDaily(Connection db, ObjectNode user, long dailyId) throws SQLException {
+        requireCrewManagement(db,user,dailyId);
+        return (ObjectNode) loadDailies(db, " WHERE d.id=?", List.of(dailyId), true).get(0);
     }
 
     private static String dailyScope(ObjectNode user) {
@@ -179,29 +270,42 @@ final class Mainline {
     }
 
     private static ArrayNode loadDailies(Connection db,String scope,List<?> arguments) throws SQLException {
+        return loadDailies(db,scope,arguments,false);
+    }
+
+    private static ArrayNode loadDailies(Connection db,String scope,List<?> arguments,boolean scheduleOnly) throws SQLException {
         Object[] args=arguments.toArray();
-        var list=rows(db,"""
-            SELECT d.*,p.name AS project_name FROM mainline_dailies d
+        String fields = scheduleOnly ? "d.id,d.project_id,d.date" : "d.*";
+        var list=rows(db,"SELECT " + fields + ", p.name AS project_name FROM mainline_dailies d " + """
             JOIN mainline_projects p ON p.id=d.project_id
             """+scope+" ORDER BY d.date DESC,d.id DESC",args);
         if (list.isEmpty()) return list;
         var byId=new HashMap<Long,ObjectNode>();
         for (var node:list) {
             var row=(ObjectNode)node;
-            scaled(row,"footage_hundredths","total_footage",2);
-            try { row.set("expenses",App.JSON.readTree(row.path("expenses").asText())); }
-            catch (com.fasterxml.jackson.core.JsonProcessingException ex) { throw new SQLException("Invalid Mainline daily expenses.",ex); }
+            if (!scheduleOnly) {
+                scaled(row,"footage_hundredths","total_footage",2);
+                try { row.set("expenses",App.JSON.readTree(row.path("expenses").asText())); }
+                catch (com.fasterxml.jackson.core.JsonProcessingException ex) { throw new SQLException("Invalid Mainline daily expenses.",ex); }
+            }
             row.putArray("members"); row.putArray("driver_ids"); row.putArray("vehicles");
             byId.put(row.path("id").asLong(),row);
         }
         for (var node: rows(db,"""
-                SELECT m.daily_id,m.person_id AS id,m.name,m.is_driver FROM mainline_dailies d
+                SELECT m.daily_id,m.person_id AS id,m.name,m.is_driver,m.supervisor_only,
+                       CASE WHEN m.supervisor_only=1 AND (p.supervisor_person_id IS NULL OR p.supervisor_person_id<>m.person_id)
+                            THEN 1 ELSE 0 END AS former_supervisor
+                FROM mainline_dailies d JOIN mainline_projects p ON p.id=d.project_id
                 JOIN mainline_daily_members m ON m.daily_id=d.id
                 """+scope+" ORDER BY m.daily_id,lower(m.name),m.person_id",args)) {
             var member=(ObjectNode)node;
             var daily=byId.get(member.remove("daily_id").asLong());
             boolean driver=member.path("is_driver").asInt()==1;
             member.put("is_driver",driver);
+            member.put("supervisor_only",member.path("supervisor_only").asInt()==1);
+            boolean former = member.path("former_supervisor").asInt()==1;
+            member.put("former_supervisor",former);
+            if (scheduleOnly && former) continue;
             daily.withArray("members").add(member);
             if(driver) daily.withArray("driver_ids").add(member.path("id").asLong());
         }
@@ -216,23 +320,31 @@ final class Mainline {
     }
 
     static ObjectNode createDaily(Connection db,ObjectNode user,ObjectNode input) throws SQLException {
-        requireAdmin(user);
-        StoreInput.fields(input,"project_id","date","member_ids","vehicle_ids","driver_ids","expenses","priority","comments","total_footage");
+        if (admin(user)) StoreInput.fields(input,"project_id","date","member_ids","vehicle_ids","driver_ids","expenses","priority","comments","total_footage");
+        else StoreInput.fields(input,"project_id","date","member_ids","vehicle_ids");
         long projectId=StoreInput.integer(input.get("project_id"),"project_id");
         String date=StoreInput.date(StoreInput.text(input,"date",10,10));
-        var members=StoreInput.ids(input,"member_ids",1,Integer.MAX_VALUE);
+        var members=StoreInput.ids(input,"member_ids",0,Integer.MAX_VALUE);
         var vehicles=input.has("vehicle_ids") ? StoreInput.ids(input,"vehicle_ids",0,Integer.MAX_VALUE) : Set.<Long>of();
         var drivers=input.has("driver_ids") ? StoreInput.ids(input,"driver_ids",0,Integer.MAX_VALUE) : Set.<Long>of();
-        if (!members.containsAll(drivers)) throw new Problem(422,"Select drivers from the daily crew.");
         var values=DailyValues.from(input);
         return transaction(db,true,()->{
-            if (one(db,"SELECT id FROM mainline_projects WHERE id=?",projectId)==null)
-                throw new Problem(404,"Mainline project not found.");
+            var project = dispatchDetails(db,user,projectId);
+            if (!admin(user) && date.compareTo(Db.today()) < 0)
+                throw new Problem(403,"You can schedule crews for today and upcoming work dates.");
+            Long autoMember = null;
+            if (project.hasNonNull("supervisor_person_id")) {
+                long supervisor = project.get("supervisor_person_id").asLong();
+                if (!members.contains(supervisor) || !admin(user)) autoMember = supervisor;
+                members.add(supervisor);
+            }
+            if (members.isEmpty()) throw new Problem(422,"Select at least one contractor for this daily crew.");
+            if (!members.containsAll(drivers)) throw new Problem(422,"Select drivers from the daily crew.");
             long id=insertId(db,"""
                 INSERT INTO mainline_dailies(project_id,date,footage_hundredths,expenses,priority,comments)
                 VALUES(?,?,?,?,?,?)
                 """,projectId,date,values.footage,values.expenses,values.priority,values.comments);
-            insertDailyMembers(db, id, members, drivers);
+            insertDailyMembers(db, id, members, drivers, autoMember);
             if (!vehicles.isEmpty()) {
                 var available=new HashMap<Long,JsonNode>();
                 for (var vehicle:Vehicles.list(db,date)) available.put(vehicle.path("id").asLong(),vehicle);
@@ -245,17 +357,17 @@ final class Mainline {
                            id,vehicleId,vehicle.get("name").asText(),vehicle.get("brand").asText(),vehicle.get("plate").asText());
                 }
             }
-            return readDaily(db,user,id);
+            return !admin(user) && !date.equals(Db.today()) ? readCrewDaily(db,user,id) : readDaily(db,user,id);
         });
     }
 
-    private static void insertDailyMembers(Connection db, long dailyId, Set<Long> members, Set<Long> drivers) throws SQLException {
+    private static void insertDailyMembers(Connection db, long dailyId, Set<Long> members, Set<Long> drivers, Long autoMember) throws SQLException {
         try (var stmt = db.prepareStatement("""
-            INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver)
-            SELECT ?,id,name,? FROM people WHERE id=? AND is_admin=0
+            INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver,supervisor_only)
+            SELECT ?,id,name,?,? FROM people WHERE id=? AND is_admin=0
             """)) {
             for (long person : members) {
-                bind(stmt, dailyId, drivers.contains(person) ? 1 : 0, person);
+                bind(stmt, dailyId, drivers.contains(person) ? 1 : 0, java.util.Objects.equals(person, autoMember) ? 1 : 0, person);
                 stmt.addBatch();
             }
             for (int result : stmt.executeBatch())
@@ -264,17 +376,20 @@ final class Mainline {
     }
 
     static ObjectNode addMembers(Connection db, ObjectNode user, long dailyId, ArrayNode memberIds) throws SQLException {
-        requireAdmin(user);
-        if (memberIds == null || memberIds.isEmpty()) throw new Problem(422, "Select contractors to add to this daily.");
-        var additions = new LinkedHashSet<Long>();
-        for (JsonNode id : memberIds) additions.add(StoreInput.integer(id, "member_ids"));
         return transaction(db, true, () -> {
-            var daily = readDaily(db, user, dailyId);
-            for (var member : daily.path("members")) additions.remove(member.path("id").asLong());
-            if (additions.isEmpty()) return daily;
+            requireCrewManagement(db,user,dailyId);
+            if (memberIds == null || memberIds.isEmpty()) throw new Problem(422, "Select contractors to add to this daily.");
+            var additions = new LinkedHashSet<Long>();
+            for (JsonNode id : memberIds) additions.add(StoreInput.integer(id, "member_ids"));
+            for (var member : rows(db, "SELECT person_id,supervisor_only FROM mainline_daily_members WHERE daily_id=?", dailyId)) {
+                long person = member.path("person_id").asLong();
+                if (additions.remove(person) && member.path("supervisor_only").asInt() == 1 &&
+                        (admin(user) || person != user.path("id").asLong()))
+                    change(db, "UPDATE mainline_daily_members SET supervisor_only=0 WHERE daily_id=? AND person_id=?", dailyId, person);
+            }
             // New members start as non-drivers. Existing report drafts remain valid and can still be saved.
-            insertDailyMembers(db, dailyId, additions, Set.of());
-            return readDaily(db, user, dailyId);
+            if (!additions.isEmpty()) insertDailyMembers(db, dailyId, additions, Set.of(), null);
+            return admin(user) ? readDaily(db, user, dailyId) : readCrewDaily(db, user, dailyId);
         });
     }
 

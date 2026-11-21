@@ -56,9 +56,10 @@ final class MainlineSchema {
         try (var stmt = db.createStatement()) {
             for (String definition : statements(StoreSql.postgres(db))) stmt.execute(definition);
         }
+        MainlineSupervisorSchema.initialize(db);
     }
 
-    // Render the same definitions used by a fresh PostgreSQL installation for an existing private schema.
+    // Render the original Mainline migration. Supervisor accounts have their own incremental migration.
     public static void main(String[] args) {
         if (args.length != 1 || !"--print-migration".equals(args[0])) throw new IllegalArgumentException("Use --print-migration");
         System.out.println("BEGIN;\nSET LOCAL ROLE fieldroutes_owner;\nSET LOCAL search_path TO fieldroutes;\n");

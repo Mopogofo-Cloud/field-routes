@@ -21,6 +21,14 @@ class PostgresImportTest {
                 sql.execute("INSERT INTO jobs(id,route_id,position,address,feet_buried) VALUES(8,19,1,'Rue Émile',126.25)");
                 sql.execute("INSERT INTO photos(id,job_id,mime,content) VALUES(1,8,'image/jpeg',x'00ff12de0044'),(135,8,'image/png',x'00')");
                 sql.execute("DELETE FROM photos WHERE id=135");
+                // Include an old Mainline project and an explicit crew member from before supervisor accounts.
+                sql.execute("DROP INDEX mainline_projects_by_supervisor");
+                sql.execute("ALTER TABLE mainline_projects DROP COLUMN supervisor_person_id");
+                sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN supervisor_only");
+                sql.execute("INSERT INTO people(id,name,username,password_hash) VALUES(5,'Field lead','field.lead','x')");
+                sql.execute("INSERT INTO mainline_projects(id,name,supervisor,state) VALUES(1,'Project','Field lead','Not Started')");
+                sql.execute("INSERT INTO mainline_dailies(id,project_id,date) VALUES(1,1,'2026-01-05')");
+                sql.execute("INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(1,5,'Field lead')");
             }
         }
         try (var fixture = new PostgresTestDatabase()) {
@@ -40,6 +48,15 @@ class PostgresImportTest {
             try (var pg = fixture.open()) { PostgresImport.migrate(file, pg, true); }
             try (var pg = fixture.open()) { PostgresImport.migrate(file, pg, false); }
             try (var pg = fixture.open(); var sql = pg.createStatement()) {
+                try (var result = sql.executeQuery("SELECT supervisor,supervisor_person_id FROM fieldroutes.mainline_projects")) {
+                    assertTrue(result.next());
+                    assertEquals("Field lead", result.getString(1));
+                    assertNull(result.getObject(2));
+                }
+                try (var result = sql.executeQuery("SELECT supervisor_only FROM fieldroutes.mainline_daily_members")) {
+                    assertTrue(result.next());
+                    assertEquals(0, result.getInt(1));
+                }
                 try (var next = sql.executeQuery("SELECT nextval(pg_get_serial_sequence('fieldroutes.photos','id'))")) {
                     assertTrue(next.next());
                     assertEquals(136L, next.getLong(1));

@@ -134,6 +134,7 @@ class HttpApiTest {
             long casey = api("POST", "/profiles", profile.replace("alex","casey").replace("Alex","Casey & Co"), 201).get("id").longValue();
             long devon = api("POST", "/profiles", profile.replace("alex","devon").replace("Alex","Devon"), 201).get("id").longValue();
             verifyMainlineForms(today, alex, casey, devon);
+            verifyProjectSupervisor(today, alex, blair, casey, devon);
             long entity = api("POST", "/entities", "{\"name\":\"Example utility\"}", 201).get("id").longValue();
             String payrollPath = "/entities/" + entity + "/payroll";
             try (var local = fixtureDatabase()) {
@@ -279,21 +280,21 @@ class HttpApiTest {
         var list = java.util.regex.Pattern.compile("<datalist id='supervisor-contractors'>(.*?)</datalist>",
             java.util.regex.Pattern.DOTALL).matcher(projectForm);
         assertTrue(list.find());
-        assertTrue(list.group(1).contains("value='Blair'") && list.group(1).contains("value='Casey &amp; Co'"));
-        assertFalse(list.group(1).contains("value='Admin'"));
+        assertTrue(list.group(1).contains("Blair (@blair, #") && list.group(1).contains("Casey &amp; Co (@casey, #"));
+        assertFalse(list.group(1).contains("(@admin, #"));
         assertTrue(projectForm.contains("name='next' value='crew'"));
         String independent = redirectTarget(request("POST", newProject,
             "name=Draft&state=Not+Started&supervisor=External+supervisor", form));
         assertTrue(independent.matches("/mainline/projects/[0-9]+"));
         assertTrue(request("GET", independent + "/edit", null, null).body().contains("value='External supervisor'"));
         String assign = redirectTarget(request("POST", newProject,
-            "name=Hill+Road&location=North&state=In+Progress&estimated_footage=2000&supervisor=Blair&next=crew", form));
+            "name=Hill+Road&location=North&state=In+Progress&estimated_footage=2000&supervisor=External+lead&next=crew", form));
         assertTrue(assign.matches("/mainline/projects/[0-9]+/dailies/new"));
         String project = assign.substring(0, assign.length() - "/dailies/new".length());
         String projectPage = request("GET", project, null, null).body();
-        assertTrue(projectPage.contains("href='" + assign + "'") && projectPage.contains("<dt>Supervisor</dt><dd>Blair</dd>"));
+        assertTrue(projectPage.contains("href='" + assign + "'") && projectPage.contains("<dt>Supervisor</dt><dd>External lead</dd>"));
         String editForm = request("GET", project + "/edit", null, null).body();
-        assertTrue(editForm.contains("name='supervisor' value='Blair'") && editForm.contains("list='supervisor-contractors'"));
+        assertTrue(editForm.contains("value='External lead'") && editForm.contains("list='supervisor-contractors'"));
         var picker = request("POST", assign,
             "date=" + today + "&member=" + worker + "&picker=search&contractor_search=Casey", form);
         assertEquals(200, picker.statusCode());
@@ -314,14 +315,14 @@ class HttpApiTest {
         assertFalse(home.contains("No routes shown"));
         assertEquals(404,request("GET",earlier,null,null).statusCode());
         assertEquals(404,request("POST",earlier,"action=save&revision=0&total_footage=35",form).statusCode());
-        assertEquals(403,request("GET",project,null,null).statusCode());
+        assertAccessDenied(request("GET",project,null,null));
         var report = request("GET",daily,null,null);
         assertEquals(200,report.statusCode());
         assertTrue(report.body().contains("href='" + document + "'"));
         String crewPath = daily + "/crew";
         assertFalse(report.body().contains("href='" + crewPath + "'"));
-        assertEquals(403, request("GET", crewPath, null, null).statusCode());
-        assertEquals(403, request("POST", crewPath, "action=add&member=" + additionalMember, form).statusCode());
+        assertAccessDenied(request("GET", crewPath, null, null));
+        assertAccessDenied(request("POST", crewPath, "action=add&member=" + additionalMember, form));
         String photoPage = daily + "/photos";
         assertTrue(report.body().contains("href='" + photoPage + "' target='_blank' rel='noopener'"));
         assertFalse(report.body().contains("type='file'"));
@@ -395,6 +396,109 @@ class HttpApiTest {
         assertTrue(dailies.contains("North crossing verified") && dailies.contains("242.5"));
         assertFalse(dailies.contains("2000-01-01"));
         assertEquals(photoPage + "#media-pictures", redirectTarget(request("POST",photoPath + "/remove","",form)));
+    }
+
+    private static void assertAccessDenied(HttpResponse<String> response) {
+        assertTrue(response.statusCode() == 403 || response.statusCode() == 404,
+            () -> response.request().method() + " " + response.uri() + " returned " + response.statusCode());
+    }
+
+    private void verifyProjectSupervisor(String today, long alex, long blair, long casey, long devon) throws Exception {
+        String form = "application/x-www-form-urlencoded";
+        String tomorrow = java.time.LocalDate.parse(today).plusDays(1).toString();
+        String projects = "/mainline/projects";
+        String settings = "name=River+crossing&state=In+Progress&driver_cost=714.43&price_per_foot=13.2468";
+        String alexOption = java.net.URLEncoder.encode("Alex (@alex, #" + alex + ")", java.nio.charset.StandardCharsets.UTF_8);
+        String unrelated = redirectTarget(request("POST", projects + "/new", "name=Other+pipeline&state=Not+Started&supervisor=" + alexOption, form));
+        String unrelatedDaily = redirectTarget(request("POST", unrelated + "/dailies/new", "date=" + today + "&member=" + devon, form));
+        // A name typed without choosing the contractor account is only a project label.
+        String project = redirectTarget(request("POST", projects + "/new", settings + "&supervisor=Blair", form));
+        String assign = project + "/dailies/new";
+        String existing = redirectTarget(request("POST", assign, "date=" + today + "&member=" + alex, form));
+        String future = redirectTarget(request("POST", assign, "date=" + tomorrow + "&member=" + alex, form));
+        String previous = redirectTarget(request("POST", assign, "date=2000-01-01&member=" + alex, form));
+        String redline = project + "/documents/redline";
+        byte[] pdf = "%PDF-1.4\n%%EOF".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        assertEquals(303, uploadFile(redline,"revision","document","application/pdf",pdf).statusCode());
+        login("alex");
+        assertEquals(200, request("GET", unrelated, null, null).statusCode());
+        assertEquals(200, request("GET", unrelatedDaily, null, null).statusCode());
+        assertEquals(200, request("GET", existing, null, null).statusCode());
+        assertAccessDenied(request("POST", existing + "/crew", "action=add&member=" + casey, form));
+        login("blair");
+        assertAccessDenied(request("GET", project, null, null));
+        assertAccessDenied(request("GET", existing, null, null));
+
+        login("admin");
+        String blairOption = "Blair (@blair, #" + blair + ")";
+        String edit = project + "/edit";
+        String chooseBlair = java.net.URLEncoder.encode(blairOption, java.nio.charset.StandardCharsets.UTF_8);
+        String staleOption = java.net.URLEncoder.encode("Old name (@blair, #" + blair + ")", java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(422, request("POST", edit, settings + "&revision=0&supervisor=" + staleOption, form).statusCode());
+        assertEquals(project, redirectTarget(request("POST", edit, settings + "&revision=0&supervisor=" + chooseBlair, form)));
+        assertTrue(request("GET", edit, null, null).body().contains("name='supervisor' value='" + blairOption + "'"));
+        login("blair");
+        String home = request("GET", "/", null, null).body();
+        assertTrue(home.contains("href='" + project + "'") && home.contains("href='" + existing + "'"));
+        assertFalse(home.contains("Other pipeline"));
+        var projectView = request("GET", project, null, null);
+        assertEquals(200, projectView.statusCode());
+        assertTrue(projectView.body().contains("href='" + assign + "'"));
+        assertEquals(200, request("GET", redline, null, null).statusCode());
+        assertEquals(403, uploadFile(redline,"revision","document","application/pdf",pdf).statusCode());
+        assertFalse(projectView.body().contains("714.43") || projectView.body().contains("13.2468"));
+        assertFalse(projectView.body().contains("href='" + edit + "'") || projectView.body().contains("href='" + previous + "'"));
+        var picker = request("GET", assign, null, null);
+        assertEquals(200, picker.statusCode());
+        assertTrue(picker.body().contains("Blair") && picker.body().contains("Alex"));
+        assertFalse(picker.body().contains("alex@example.test") || picker.body().contains("href='/people/new'"));
+        for (String restricted : java.util.List.of(projects, projects + "/new", edit, "/teams/new", "/people",
+                "/payroll", unrelated, unrelated + "/dailies/new", unrelatedDaily, unrelatedDaily + "/crew",
+                previous, previous + "/crew", future, future + "/photos")) {
+            assertAccessDenied(request("GET", restricted, null, null));
+        }
+        assertAccessDenied(request("POST", edit, settings + "&revision=1&supervisor=", form));
+        assertAccessDenied(request("POST", project + "/export", "scope=all", form));
+        assertAccessDenied(request("POST", unrelated + "/dailies/new", "date=" + today + "&member=" + blair, form));
+        assertAccessDenied(request("POST", unrelatedDaily + "/crew", "action=add&member=" + blair, form));
+        assertAccessDenied(request("POST", previous + "/crew", "action=add&member=" + casey, form));
+        api("GET", "/profiles", null, 403);
+        int backdate = request("POST", assign, "date=2000-01-01&member=" + alex, form).statusCode();
+        assertTrue(backdate == 403 || backdate == 422);
+        assertEquals(200, request("GET", future + "/crew", null, null).statusCode());
+        assertTrue(redirectTarget(request("POST", assign, "date=" + tomorrow + "&member=" + alex, form)).startsWith(project));
+
+        // The server includes the supervisor even when the form posts no manually selected members.
+        String solo = redirectTarget(request("POST", assign, "date=" + today + "&action=create", form));
+        assertTrue(solo.matches("/mainline/dailies/[0-9]+"));
+        var report = request("GET", solo, null, null);
+        assertEquals(200, report.statusCode());
+        assertTrue(report.body().contains("Team members (1)") && report.body().contains("Blair"));
+        String update = "action=save&revision=0&comments=Supervisor+field+notes&driver=" + blair;
+        assertEquals(solo + "?saved=1", redirectTarget(request("POST", solo, update, form)));
+        assertEquals(solo + "?crew=1", redirectTarget(request("POST", solo + "/crew", "action=add&member=" + casey, form)));
+        login("casey");
+        assertTrue(request("GET", solo, null, null).body().contains("Supervisor field notes"));
+        assertAccessDenied(request("POST", solo + "/crew", "action=add&member=" + devon, form));
+
+        login("admin");
+        String caseyOption = java.net.URLEncoder.encode("Casey & Co (@casey, #" + casey + ")", java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(project, redirectTarget(request("POST", edit, settings + "&revision=1&supervisor=" + caseyOption, form)));
+        login("blair");
+        assertFalse(request("GET", "/", null, null).body().contains("River crossing"));
+        for (String revoked : java.util.List.of(project, assign, solo, existing, future + "/crew", redline))
+            assertAccessDenied(request("GET", revoked, null, null));
+        login("casey");
+        assertEquals(200, request("GET", assign, null, null).statusCode());
+        assertEquals(200, request("GET", existing, null, null).statusCode());
+        login("admin");
+        assertEquals(project, redirectTarget(request("POST", edit, settings + "&revision=2&supervisor=", form)));
+        login("casey");
+        assertAccessDenied(request("GET", project, null, null));
+        assertAccessDenied(request("GET", existing, null, null));
+        assertEquals(200, request("GET", solo, null, null).statusCode()); // Explicitly on this crew before promotion.
+        assertAccessDenied(request("POST", solo + "/crew", "action=add&member=" + devon, form));
+        login("admin");
     }
 
     private void verifyJobIdEdit(long job) throws Exception {
