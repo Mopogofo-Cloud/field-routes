@@ -71,11 +71,64 @@ class MainlineTest {
         assertEquals(0,new BigDecimal("125.34").compareTo(Mainline.project(db,project).path("total_footage").decimalValue()));
         assertTrue(Mainline.project(db,project).at("/latest_daily/members/0/is_driver").asBoolean());
         assertEquals(0,one(db,"SELECT count(*) AS n FROM routes").get("n").asInt());
+        verifyCrewAddition(db, admin, worker, other, id);
         String past=LocalDate.parse(Db.today()).minusDays(1).toString();
         change(db,"UPDATE mainline_dailies SET date=? WHERE id=?",past,id);
         assertTrue(Mainline.dailies(db,worker,past,project).isEmpty());
         assertFalse(Mainline.canSeeProject(db,worker,project));
         assertEquals(404,assertThrows(Problem.class,()->Mainline.saveFootage(db,worker,id,1,BigDecimal.ONE)).status);
         assertEquals(1,Mainline.dailies(db,admin,past,project).size());
+        verifyFullDailyCrew(db, admin, project, id);
+    }
+
+    private static void verifyCrewAddition(Connection db, ObjectNode admin, ObjectNode worker,
+                                           ObjectNode other, long dailyId) throws Exception {
+        var before = Mainline.daily(db, admin, dailyId);
+        var incoming = App.JSON.createArrayNode().add(other.path("id"));
+        assertEquals(403, assertThrows(Problem.class, () -> Mainline.addMembers(db, worker, dailyId, incoming)).status);
+        assertEquals(404, assertThrows(Problem.class, () -> Mainline.addMembers(db, admin, 999, incoming)).status);
+        for (int invalidId : new int[]{1, 999}) {
+            var mixed = incoming.deepCopy().add(invalidId);
+            assertEquals(422, assertThrows(Problem.class, () -> Mainline.addMembers(db, admin, dailyId, mixed)).status);
+            assertEquals(before, Mainline.daily(db, admin, dailyId));
+        }
+
+        // Includes a duplicate and a driver whose profile was renamed after the daily was created.
+        var selection = incoming.deepCopy().add(other.path("id")).add(worker.path("id"));
+        var after = Mainline.addMembers(db, admin, dailyId, selection);
+        assertEquals(after, Mainline.addMembers(db, admin, dailyId, selection));
+        assertEquals(after, Mainline.daily(db, other, dailyId));
+        assertEquals(2, after.path("members").size());
+        assertEquals(before.at("/members/0"), after.at("/members/0"));
+        assertFalse(after.at("/members/1/is_driver").asBoolean());
+        assertEquals(before.deepCopy().without("members"), after.deepCopy().without("members"));
+    }
+
+    private static void verifyFullDailyCrew(Connection db, ObjectNode admin, long project, long pastDailyId) throws Exception {
+        var draft = App.JSON.createObjectNode().put("project_id", project).put("date", Db.today());
+        var members = draft.putArray("member_ids");
+        try (var insert = db.prepareStatement("INSERT INTO people(id,username,password_hash,name) VALUES(?,?,'x',?)")) {
+            for (int i = 1; i <= 163; i++) {
+                long id = 100 + i;
+                bind(insert, id, "roster" + i, "Roster member " + i);
+                insert.addBatch();
+                members.add(id);
+            }
+            insert.executeBatch();
+        }
+        var daily = Mainline.createDaily(db, admin, draft);
+        assertEquals(163, daily.path("members").size());
+        for (int index : new int[]{0, 81, 162}) {
+            var assigned = person(members.get(index).asLong(), false);
+            var reports = Mainline.dailies(db, assigned, Db.today(), project);
+            assertEquals(1, reports.size());
+            assertEquals(daily.path("id"), reports.get(0).path("id"));
+        }
+        assertEquals(1, Mainline.dailies(db, admin, Db.today(), project).size());
+        var expanded = Mainline.addMembers(db, admin, pastDailyId, members);
+        assertEquals(165, expanded.path("members").size());
+        assertEquals(expanded, Mainline.addMembers(db, admin, pastDailyId, members));
+        var lastWorker = person(members.get(162).asLong(), false);
+        assertEquals(404, assertThrows(Problem.class, () -> Mainline.daily(db, lastWorker, pastDailyId)).status);
     }
 }

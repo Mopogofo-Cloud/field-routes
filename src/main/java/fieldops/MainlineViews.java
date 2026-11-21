@@ -25,7 +25,9 @@ final class MainlineViews {
             return;
         }
         if (!user.path("is_admin").asBoolean()) throw new Problem(403, "Administrator access required.");
-        if (path.equals("/mainline/projects/new") || path.matches("/mainline/projects/[0-9]+/edit")) {
+        if (path.matches("/mainline/dailies/[0-9]+/crew")) {
+            MainlineDailyViews.crew(req, res, db, user, id(parts[3]), post);
+        } else if (path.equals("/mainline/projects/new") || path.matches("/mainline/projects/[0-9]+/edit")) {
             editor(req, res, db, user, parts[3].equals("new") ? null : id(parts[3]), post);
         } else if (path.matches("/mainline/projects/[0-9]+/dailies/new")) {
             MainlineDailyViews.assign(req, res, db, user, id(parts[3]), post);
@@ -95,7 +97,8 @@ final class MainlineViews {
             data.put("lunch_provided", "yes".equals(param(req, "lunch_provided")));
             try {
                 var saved = Mainline.saveProject(db, user, projectId, data);
-                redirect(res, projectPath(saved));
+                String path = projectPath(saved);
+                redirect(res, create && "crew".equals(param(req, "next")) ? path + "/dailies/new" : path);
                 return;
             } catch (Problem err) {
                 res.setStatus(err.status);
@@ -109,8 +112,12 @@ final class MainlineViews {
         if (!create) form.append(hidden("revision", value(data, "revision")));
         form.append(field("Project name", "name", value(data, "name"), "required maxlength='240'"))
             .append(field("Location of project", "location", value(data, "location"), "maxlength='500'"))
-            .append(field("Supervisor name", "supervisor", value(data, "supervisor"), "maxlength='240'"))
-            .append("<div class='two'><label>Project state<select name='state'>");
+            .append(field("Supervisor name", "supervisor", value(data, "supervisor"),
+                "list='supervisor-contractors' placeholder='Type a first or last name' autocomplete='off' maxlength='240'"))
+            .append("<datalist id='supervisor-contractors'>");
+        for (var contractor : Store.contractorNames(db))
+            form.append("<option value='").append(h(value(contractor, "name"))).append("'></option>");
+        form.append("</datalist><div class='two'><label>Project state<select name='state'>");
         for (var state : Mainline.STATES) form.append(option(state, state, value(data, "state")));
         form.append("</select></label><label>Lunch provided<select name='lunch_provided'>")
             .append(option("no", "No", lunch)).append(option("yes", "Yes", lunch)).append("</select></label></div>")
@@ -118,8 +125,11 @@ final class MainlineViews {
             .append(field("Due date", "due_date", value(data, "due_date"), "type='date'")).append("</div><div class='two'>")
             .append(field("Driver cost ($)", "driver_cost", value(data, "driver_cost"), "type='number' min='0' step='0.01'"))
             .append(field("Price per foot ($)", "price_per_foot", value(data, "price_per_foot"), "type='number' min='0' step='0.0001'"))
-            .append("</div><div class='actions'>").append(link("Cancel", back, "btn secondary"))
-            .append("<button>Save project</button></div></form>");
+            .append("</div><div class='actions'>").append(link("Cancel", back, "btn secondary"));
+        if (create) form.append("<button class='secondary'>Save project</button>")
+            .append("<button name='next' value='crew'>Save and assign daily crew</button>");
+        else form.append("<button>Save project</button>");
+        form.append("</div></form>");
         page(res, user, title, heading(title, create ? "Projects" : "Project", back, "") + form);
     }
 

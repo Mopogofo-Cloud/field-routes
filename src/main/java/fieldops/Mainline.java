@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import static fieldops.StoreSql.*;
@@ -231,16 +232,7 @@ final class Mainline {
                 INSERT INTO mainline_dailies(project_id,date,footage_hundredths,expenses,priority,comments)
                 VALUES(?,?,?,?,?,?)
                 """,projectId,date,values.footage,values.expenses,values.priority,values.comments);
-            try (var stmt=db.prepareStatement("""
-                INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver)
-                SELECT ?,id,name,? FROM people WHERE id=? AND is_admin=0
-                """)) {
-                for (long person:members) {
-                    bind(stmt,id,drivers.contains(person)?1:0,person);
-                    stmt.addBatch();
-                }
-                for (int result:stmt.executeBatch()) if (result==0) throw new Problem(422,"Select valid contractors for the daily crew.");
-            }
+            insertDailyMembers(db, id, members, drivers);
             if (!vehicles.isEmpty()) {
                 var available=new HashMap<Long,JsonNode>();
                 for (var vehicle:Vehicles.list(db,date)) available.put(vehicle.path("id").asLong(),vehicle);
@@ -254,6 +246,35 @@ final class Mainline {
                 }
             }
             return readDaily(db,user,id);
+        });
+    }
+
+    private static void insertDailyMembers(Connection db, long dailyId, Set<Long> members, Set<Long> drivers) throws SQLException {
+        try (var stmt = db.prepareStatement("""
+            INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver)
+            SELECT ?,id,name,? FROM people WHERE id=? AND is_admin=0
+            """)) {
+            for (long person : members) {
+                bind(stmt, dailyId, drivers.contains(person) ? 1 : 0, person);
+                stmt.addBatch();
+            }
+            for (int result : stmt.executeBatch())
+                if (result == 0) throw new Problem(422, "Select valid contractors for the daily crew.");
+        }
+    }
+
+    static ObjectNode addMembers(Connection db, ObjectNode user, long dailyId, ArrayNode memberIds) throws SQLException {
+        requireAdmin(user);
+        if (memberIds == null || memberIds.isEmpty()) throw new Problem(422, "Select contractors to add to this daily.");
+        var additions = new LinkedHashSet<Long>();
+        for (JsonNode id : memberIds) additions.add(StoreInput.integer(id, "member_ids"));
+        return transaction(db, true, () -> {
+            var daily = readDaily(db, user, dailyId);
+            for (var member : daily.path("members")) additions.remove(member.path("id").asLong());
+            if (additions.isEmpty()) return daily;
+            // New members start as non-drivers. Existing report drafts remain valid and can still be saved.
+            insertDailyMembers(db, dailyId, additions, Set.of());
+            return readDaily(db, user, dailyId);
         });
     }
 

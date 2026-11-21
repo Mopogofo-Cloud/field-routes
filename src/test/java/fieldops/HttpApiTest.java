@@ -131,7 +131,9 @@ class HttpApiTest {
                 """;
             long alex = api("POST", "/profiles", profile, 201).get("id").longValue();
             long blair = api("POST", "/profiles", profile.replace("alex","blair").replace("Alex","Blair"), 201).get("id").longValue();
-            verifyMainlineForms(today, alex);
+            long casey = api("POST", "/profiles", profile.replace("alex","casey").replace("Alex","Casey & Co"), 201).get("id").longValue();
+            long devon = api("POST", "/profiles", profile.replace("alex","devon").replace("Alex","Devon"), 201).get("id").longValue();
+            verifyMainlineForms(today, alex, casey, devon);
             long entity = api("POST", "/entities", "{\"name\":\"Example utility\"}", 201).get("id").longValue();
             String payrollPath = "/entities/" + entity + "/payroll";
             try (var local = fixtureDatabase()) {
@@ -269,19 +271,37 @@ class HttpApiTest {
             .header("Content-Type", "multipart/form-data; boundary=test-file").POST(body).build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
-    private void verifyMainlineForms(String today, long worker) throws Exception {
+    private void verifyMainlineForms(String today, long worker, long secondMember, long additionalMember) throws Exception {
         String form = "application/x-www-form-urlencoded";
-        String project = redirectTarget(request("POST", "/mainline/projects/new",
-            "name=Hill+Road&location=North&state=In+Progress&estimated_footage=2000", form));
-        assertTrue(project.matches("/mainline/projects/[0-9]+"));
-        String assign = project + "/dailies/new";
-        assertTrue(request("GET", project, null, null).body().contains("href='" + assign + "'"));
-        var picker = request("POST", assign, "date=" + today + "&picker=search&contractor_search=Alex", form);
+        String newProject = "/mainline/projects/new";
+        String projectForm = request("GET", newProject, null, null).body();
+        assertTrue(projectForm.contains("name='supervisor'") && projectForm.contains("list='supervisor-contractors'"));
+        var list = java.util.regex.Pattern.compile("<datalist id='supervisor-contractors'>(.*?)</datalist>",
+            java.util.regex.Pattern.DOTALL).matcher(projectForm);
+        assertTrue(list.find());
+        assertTrue(list.group(1).contains("value='Blair'") && list.group(1).contains("value='Casey &amp; Co'"));
+        assertFalse(list.group(1).contains("value='Admin'"));
+        assertTrue(projectForm.contains("name='next' value='crew'"));
+        String independent = redirectTarget(request("POST", newProject,
+            "name=Draft&state=Not+Started&supervisor=External+supervisor", form));
+        assertTrue(independent.matches("/mainline/projects/[0-9]+"));
+        assertTrue(request("GET", independent + "/edit", null, null).body().contains("value='External supervisor'"));
+        String assign = redirectTarget(request("POST", newProject,
+            "name=Hill+Road&location=North&state=In+Progress&estimated_footage=2000&supervisor=Blair&next=crew", form));
+        assertTrue(assign.matches("/mainline/projects/[0-9]+/dailies/new"));
+        String project = assign.substring(0, assign.length() - "/dailies/new".length());
+        String projectPage = request("GET", project, null, null).body();
+        assertTrue(projectPage.contains("href='" + assign + "'") && projectPage.contains("<dt>Supervisor</dt><dd>Blair</dd>"));
+        String editForm = request("GET", project + "/edit", null, null).body();
+        assertTrue(editForm.contains("name='supervisor' value='Blair'") && editForm.contains("list='supervisor-contractors'"));
+        var picker = request("POST", assign,
+            "date=" + today + "&member=" + worker + "&picker=search&contractor_search=Casey", form);
         assertEquals(200, picker.statusCode());
-        assertTrue(picker.body().contains("name='member' value='" + worker + "'"));
+        assertTrue(picker.body().contains("name='member' value='" + worker + "' checked"));
+        assertTrue(picker.body().contains("name='member' value='" + secondMember + "'>"));
         String member = "&action=create&member=" + worker;
         String earlier = redirectTarget(request("POST", assign, "date=2000-01-01" + member, form));
-        String daily = redirectTarget(request("POST", assign, "date=" + today + member, form));
+        String daily = redirectTarget(request("POST", assign, "date=" + today + member + "&member=" + secondMember, form));
         assertTrue(daily.matches("/mainline/dailies/[0-9]+"));
         assertNotEquals(earlier, daily);
         String document = project + "/documents/fiber";
@@ -298,6 +318,10 @@ class HttpApiTest {
         var report = request("GET",daily,null,null);
         assertEquals(200,report.statusCode());
         assertTrue(report.body().contains("href='" + document + "'"));
+        String crewPath = daily + "/crew";
+        assertFalse(report.body().contains("href='" + crewPath + "'"));
+        assertEquals(403, request("GET", crewPath, null, null).statusCode());
+        assertEquals(403, request("POST", crewPath, "action=add&member=" + additionalMember, form).statusCode());
         String photoPage = daily + "/photos";
         assertTrue(report.body().contains("href='" + photoPage + "' target='_blank' rel='noopener'"));
         assertFalse(report.body().contains("type='file'"));
@@ -329,6 +353,27 @@ class HttpApiTest {
         assertEquals(200,request("GET",photoPath,null,null).statusCode());
         assertEquals(403,request("POST",project + "/export","scope=all",form).statusCode());
 
+        login("casey");
+        assertTrue(request("GET","/",null,null).body().contains("href='" + daily + "'"));
+        assertTrue(request("GET",daily,null,null).body().contains("North crossing"));
+        String checked = fields.replace("revision=0", "revision=1").replace("North+crossing", "North+crossing+verified");
+        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,checked,form)));
+        login("alex");
+        assertTrue(request("GET",daily,null,null).body().contains("North crossing verified"));
+
+        login("devon");
+        assertEquals(404, request("GET", daily, null, null).statusCode());
+        login("admin");
+        assertTrue(request("GET",daily,null,null).body().contains("href='" + crewPath + "'"));
+        var more = request("POST", crewPath, "picker=search&contractor_search=Devon", form);
+        assertTrue(more.body().contains("name='member' value='" + additionalMember + "'"));
+        assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, "action=add&member=" + additionalMember, form)));
+        for (String name : java.util.List.of("alex", "casey", "devon")) {
+            login(name);
+            assertTrue(request("GET","/",null,null).body().contains("href='" + daily + "'"));
+            assertTrue(request("GET",daily,null,null).body().contains("North crossing verified"));
+        }
+
         login("blair");
         assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
         for (String hidden : java.util.List.of(document,daily,photoPage,photoPath))
@@ -347,7 +392,7 @@ class HttpApiTest {
         assertTrue(contents.containsKey("xl/workbook.xml"));
         assertTrue(contents.keySet().stream().anyMatch(path -> path.startsWith("xl/media/")));
         String dailies = new String(contents.get("xl/worksheets/sheet2.xml"),java.nio.charset.StandardCharsets.UTF_8);
-        assertTrue(dailies.contains("North crossing") && dailies.contains("242.5"));
+        assertTrue(dailies.contains("North crossing verified") && dailies.contains("242.5"));
         assertFalse(dailies.contains("2000-01-01"));
         assertEquals(photoPage + "#media-pictures", redirectTarget(request("POST",photoPath + "/remove","",form)));
     }

@@ -33,6 +33,7 @@ final class MainlineDailyViews {
             }
         } else if (post && picker.isEmpty() && !action.equals("availability")) {
             try {
+                if (draft.path("member_ids").isEmpty()) throw new Problem(422, "Select at least one contractor for this daily crew.");
                 var daily = Mainline.createDaily(db, user, draft);
                 redirect(res, "/mainline/dailies/" + daily.path("id").asLong());
                 return;
@@ -46,6 +47,7 @@ final class MainlineDailyViews {
         try { vehicleDate = StoreInput.date(date); }
         catch (Problem err) { vehicleDate = value(user, "today"); }
         var form = new StringBuilder("<form class='panel stack editor' method='post'>").append(alert(problem))
+            .append("<p class='helper'>Select everyone working on this project for the work date. The crew shares one daily report.</p>")
             .append(field("Work date", "date", date, "type='date' required"))
             .append("<div class='actions'>");
         if (project.path("latest_daily").isObject())
@@ -73,8 +75,8 @@ final class MainlineDailyViews {
         }
         if (!vehicles.isEmpty()) form.append("</div>");
         form.append("</fieldset><div class='actions'>").append(link("Cancel", projectPath, "btn secondary"))
-            .append("<button name='action' value='create'>Create daily</button></div></form>");
-        page(res, user, "Create daily", MainlineViews.heading("Create daily", value(project,"name"), projectPath, "") + form);
+            .append("<button name='action' value='create'>Create daily report</button></div></form>");
+        page(res, user, "Assign daily crew", MainlineViews.heading("Assign daily crew", value(project,"name"), projectPath, "") + form);
     }
 
     private static void collectIds(HttpServletRequest req, String field, ArrayNode target) {
@@ -89,6 +91,51 @@ final class MainlineDailyViews {
         var result = new HashSet<String>();
         for (var id : list) result.add(id.asText());
         return result;
+    }
+
+    static void crew(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user,
+                     long dailyId, boolean post) throws Exception {
+        if (!user.path("is_admin").asBoolean()) throw new Problem(403, "Administrator access required.");
+        var daily = Mainline.daily(db, user, dailyId);
+        String path = "/mainline/dailies/" + dailyId;
+        var draft = App.JSON.createObjectNode();
+        var selected = draft.putArray("member_ids");
+        collectIds(req, "member", selected);
+        String picker = param(req, "picker");
+        String problem = "";
+        if (post && picker.isEmpty()) {
+            try {
+                Mainline.addMembers(db, user, dailyId, selected);
+                redirect(res, path + "?crew=1");
+                return;
+            } catch (Problem err) {
+                res.setStatus(err.status);
+                problem = err.getMessage();
+            }
+        }
+
+        String title = "Add team members";
+        var form = new StringBuilder("<section class='panel stack editor'>").append(alert(problem))
+            .append("<p>").append(h(value(daily, "project_name"))).append(" · ").append(h(value(daily, "date"))).append("</p>")
+            .append("<details><summary>Current crew (").append(daily.path("members").size()).append(")</summary><ul>");
+        var assigned = new HashSet<Long>();
+        for (var member : daily.path("members")) {
+            assigned.add(member.path("id").asLong());
+            form.append("<li>").append(h(value(member, "name"))).append("</li>");
+        }
+        form.append("</ul></details>");
+        var candidates = App.JSON.createArrayNode();
+        for (var person : Store.profiles(db))
+            if (!assigned.contains(person.path("id").asLong())) candidates.add(person);
+        if (candidates.isEmpty()) form.append("<p>All contractors are on this daily crew.</p>");
+        else {
+            form.append("<form class='stack' method='post'>")
+                .append(AdminViews.contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search")))
+                .append("<div class='actions'>").append(link("Cancel", path, "btn secondary"))
+                .append("<button name='action' value='add'>Add to daily crew</button></div></form>");
+        }
+        form.append("</section>");
+        page(res, user, title, MainlineViews.heading(title, "Daily report", path, "") + form);
     }
 
     static void report(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user,
@@ -128,13 +175,16 @@ final class MainlineDailyViews {
         boolean admin = user.path("is_admin").asBoolean();
         String projectName = value(daily,"project_name");
         String title = projectName + " · " + value(daily,"date");
-        String heading = admin ? MainlineViews.heading(title, "Project", "/mainline/projects/" + projectId, "") :
+        String heading = admin ? MainlineViews.heading(title, "Project", "/mainline/projects/" + projectId,
+            "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Add team members (opens in a new tab)</a>") :
             link("← My route", "/", "worker-back worker-text-button") + "<h1>" + h(title) + "</h1>";
         var form = new StringBuilder("<div class='stack'>").append(heading);
         if (param(req,"saved").equals("1") && !post) form.append(notice("Daily report saved."));
+        if (admin && param(req, "crew").equals("1") && !post) form.append(notice("Daily crew updated."));
         form.append("<form method='post' class='panel stack editor'>").append(alert(problem))
             .append(hidden("revision", value(draft,"revision"))).append("<h2>Daily report</h2>")
             .append(field("Total footage (ft)", "total_footage", value(draft,"total_footage"), "type='number' min='0' step='0.01'"))
+            .append("<details open><summary>Team members (").append(daily.path("members").size()).append(")</summary>")
             .append("<fieldset><legend>Drivers</legend><div class='choices'>");
         var drivers = idSet(draft.path("driver_ids"));
         for (var member : daily.path("members")) {
@@ -142,7 +192,7 @@ final class MainlineDailyViews {
             form.append("<label><input type='checkbox' name='driver' value='").append(h(key))
                 .append(drivers.contains(key) ? "' checked>" : "'>").append(h(value(member,"name"))).append("</label>");
         }
-        form.append("</div></fieldset>").append(vehicleLine(daily));
+        form.append("</div></fieldset></details>").append(vehicleLine(daily));
         form.append("<fieldset class='stack'><legend>Expenses</legend>");
         int i = 0;
         for (var expense : draft.path("expenses")) {

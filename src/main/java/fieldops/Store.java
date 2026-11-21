@@ -67,6 +67,10 @@ public final class Store {
         return rows(db, PROFILES + " ORDER BY name,id");
     }
 
+    static ArrayNode contractorNames(Connection db) throws SQLException {
+        return rows(db, "SELECT DISTINCT name FROM people WHERE is_admin=0 ORDER BY name");
+    }
+
     public static ObjectNode saveProfile(Connection db, ObjectNode input, Long id) throws Exception {
         fields(input, "name","role","pay_basis","pay_rate","username","password","email","phone","address","start_date","status");
         Map<String,Object> values = new LinkedHashMap<>();
