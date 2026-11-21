@@ -537,6 +537,11 @@ final class AdminViews {
     }
 
     static String contractorPicker(ArrayNode people, ObjectNode d, String query, boolean admin) {
+        return contractorPicker(people, d, query, admin, null);
+    }
+
+    static String contractorPicker(ArrayNode people, ObjectNode d, String query, boolean admin,
+                                   java.util.function.BiFunction<String,String,String> memberControl) {
         if (query.length() > 250) throw new Problem(422, "Enter a shorter contractor name.");
         query = query.strip();
         StringBuilder out = new StringBuilder("<fieldset id='contractors' class='stack'><legend>Subcontractors</legend>");
@@ -572,14 +577,16 @@ final class AdminViews {
             String searchable = searchText(showUsername ? name + " " + username : name);
             if (!onTeam && !Arrays.stream(terms).allMatch(searchable::contains)) continue;
             var group = onTeam ? crew : matches;
+            if (memberControl != null) group.append("<div class='crew-role-row'>");
             group.append("<label><input type='checkbox' name='member' value='").append(h(key))
                 .append(onTeam ? "' checked>" : "'>").append("<span>").append(h(name));
             if (showUsername) {
                 group.append(" <span class='helper'>· ").append(h(username));
-                if (admin) group.append(" · ").append(role.isBlank() ? "Role unassigned" : h(role));
+                if (admin && memberControl == null) group.append(" · ").append(role.isBlank() ? "Role unassigned" : h(role));
                 group.append("</span>");
             }
             group.append("</span></label>");
+            if (memberControl != null) group.append(memberControl.apply(key, name)).append("</div>");
         }
         out.append(suggestions).append("</datalist></div>");
         if (!crew.isEmpty()) out.append("<div><h3>Selected contractors</h3><div class='choices'>").append(crew).append("</div></div>");

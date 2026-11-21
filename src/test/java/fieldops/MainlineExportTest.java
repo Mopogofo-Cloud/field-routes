@@ -5,7 +5,9 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.DriverManager;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipInputStream;
@@ -20,14 +22,21 @@ class MainlineExportTest {
         try (var db = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Db.initialize(db);
             var admin = App.JSON.createObjectNode().put("is_admin",true);
-            change(db,"INSERT INTO people(id,username,name,password_hash,is_admin) VALUES(1,'worker','Crew Member','unused',0)");
+            change(db,"""
+                INSERT INTO people(id,username,name,password_hash,is_admin) VALUES
+                (1,'worker','Crew Member','unused',0),(2,'other','Other Member','unused',0)
+                """);
             change(db,"INSERT INTO mainline_projects(id,name,state) VALUES(1,'Build & Survey','In Progress'),(2,'Other','Not Started')");
             change(db,"""
                 INSERT INTO mainline_dailies(id,project_id,date,footage_hundredths,expenses,comments) VALUES
                 (1,1,'2026-11-01',1250,'[{"type":"Hotel","cost":120.50}]','Under drive'),
                 (2,1,'2026-11-02',500,'[]','Excluded comment'),(3,2,'2026-11-02',0,'[]','Other project')
                 """);
-            change(db,"INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver) VALUES(1,1,'Crew Member',1)");
+            change(db,"""
+                INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver,crew_role) VALUES
+                (1,1,'Crew Member',1,'Machine Operator'),(2,1,'Crew Member',0,'Locator')
+                """);
+            change(db,"INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver) VALUES(2,2,'Other Member',0)");
             var original = new ByteArrayOutputStream();
             ImageIO.write(new BufferedImage(16,8,BufferedImage.TYPE_INT_RGB),"png",original);
             byte[] bytes = original.toByteArray();
@@ -54,7 +63,9 @@ class MainlineExportTest {
             assertTrue(daily.contains("Under drive"));
             assertFalse(daily.contains("Excluded comment"));
             assertTrue(daily.contains("<v>12.5</v>"));
-            assertTrue(xml(entries,"xl/worksheets/sheet3.xml").contains("Crew Member"));
+            var firstCrew = List.of("1","2026-11-01","Crew Member","Yes","Assigned","Machine Operator");
+            var crewHeader = List.of("Daily ID","Date","Crew member","Driver","Crew status","Daily role");
+            assertEquals(List.of(crewHeader,firstCrew),crewRows(entries));
             assertTrue(xml(entries,"xl/worksheets/sheet5.xml").contains("<v>120.5"));
             assertTrue(xml(entries,"xl/worksheets/sheet6.xml").contains("Receipts"));
             assertTrue(xml(entries,"xl/worksheets/_rels/sheet6.xml.rels").contains("../drawings/drawing6.xml"));
@@ -65,6 +76,8 @@ class MainlineExportTest {
             out.reset();
             MainlineExport.write(out, MainlineExport.load(db,admin,1,null,false), (d,i)->fail("Photos were disabled"));
             entries = unpack(out.toByteArray());
+            assertEquals(List.of(crewHeader,List.of("2","2026-11-02","Crew Member","No","Assigned","Locator"),
+                List.of("2","2026-11-02","Other Member","No","Assigned",""),firstCrew),crewRows(entries));
             assertTrue(xml(entries,"xl/worksheets/sheet2.xml").contains("Excluded comment"));
             assertFalse(entries.containsKey("xl/drawings/drawing6.xml"));
             assertFalse(xml(entries,"xl/workbook.xml").contains("Images"));
@@ -82,6 +95,20 @@ class MainlineExportTest {
                     parser.newDocumentBuilder().parse(new ByteArrayInputStream(data));
                 assertNull(result.put(entry.getName(),data));
             }
+        }
+        return result;
+    }
+
+    private static List<List<String>> crewRows(Map<String,byte[]> workbook) throws Exception {
+        var sheet = DocumentBuilderFactory.newInstance().newDocumentBuilder()
+            .parse(new ByteArrayInputStream(workbook.get("xl/worksheets/sheet3.xml")));
+        var result = new ArrayList<List<String>>();
+        var rows = sheet.getElementsByTagName("row");
+        for (int i=0; i<rows.getLength(); i++) {
+            var cells = ((org.w3c.dom.Element) rows.item(i)).getElementsByTagName("c");
+            var row = new ArrayList<String>();
+            for (int j=0; j<cells.getLength(); j++) row.add(cells.item(j).getTextContent());
+            result.add(row);
         }
         return result;
     }

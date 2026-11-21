@@ -181,6 +181,9 @@ public final class PostgresImport {
                                               (table.equals("mainline_dailies") && name.equals("crew_revision")))) {
                         key = 0;
                         sourceExpression = "0";
+                    } else if (key == null && table.equals("mainline_daily_members") && name.equals("crew_role")) {
+                        key = 0;
+                        sourceExpression = "''";
                     }
                     check(key != null, "Source is missing " + table + "." + name + ". Upgrade a backup of the source first.");
                     result.add(new Column(name, rows.getString(2), key, rows.getString(3).equals("YES"), sourceExpression));

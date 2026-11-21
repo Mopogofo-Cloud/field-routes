@@ -26,6 +26,7 @@ class PostgresImportTest {
                 sql.execute("ALTER TABLE mainline_projects DROP COLUMN supervisor_person_id");
                 sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN supervisor_only");
                 sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN removed");
+                sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN crew_role");
                 sql.execute("ALTER TABLE mainline_dailies DROP COLUMN crew_revision");
                 sql.execute("INSERT INTO people(id,name,username,password_hash) VALUES(5,'Field lead','field.lead','x')");
                 sql.execute("INSERT INTO mainline_projects(id,name,supervisor,state) VALUES(1,'Project','Field lead','Not Started')");
@@ -55,10 +56,11 @@ class PostgresImportTest {
                     assertEquals("Field lead", result.getString(1));
                     assertNull(result.getObject(2));
                 }
-                try (var result = sql.executeQuery("SELECT supervisor_only,removed FROM fieldroutes.mainline_daily_members")) {
+                try (var result = sql.executeQuery("SELECT supervisor_only,removed,crew_role FROM fieldroutes.mainline_daily_members")) {
                     assertTrue(result.next());
                     assertEquals(0, result.getInt(1));
                     assertEquals(0, result.getInt(2));
+                    assertEquals("", result.getString(3));
                 }
                 try (var result = sql.executeQuery("SELECT crew_revision FROM fieldroutes.mainline_dailies")) {
                     assertTrue(result.next());

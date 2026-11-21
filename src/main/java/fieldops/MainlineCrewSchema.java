@@ -14,6 +14,8 @@ final class MainlineCrewSchema {
             addColumn(db, pg, "mainline_daily_members", "supervisor_only", "INTEGER NOT NULL DEFAULT 0 CHECK(supervisor_only IN (0,1))");
             addColumn(db, pg, "mainline_dailies", "crew_revision", (pg ? "bigint" : "INTEGER") + " NOT NULL DEFAULT 0");
             addColumn(db, pg, "mainline_daily_members", "removed", "INTEGER NOT NULL DEFAULT 0 CHECK(removed IN (0,1))");
+            addColumn(db, pg, "mainline_daily_members", "crew_role",
+                "TEXT NOT NULL DEFAULT '' CHECK(crew_role IN ('','Machine Operator','Locator','Trencher','Missile Man'))");
             sql.execute("CREATE INDEX IF NOT EXISTS mainline_projects_by_supervisor ON mainline_projects(supervisor_person_id,id)");
         }
     }

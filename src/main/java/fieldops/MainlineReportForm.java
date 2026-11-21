@@ -32,9 +32,12 @@ final class MainlineReportForm {
         draft = App.JSON.createObjectNode().put("revision", param(req, "revision"))
             .put("priority", param(req, "priority")).put("comments", param(req, "comments"))
             .put("total_footage", param(req, "total_footage"));
-        ArrayNode drivers = draft.putArray("driver_ids");
-        for (String key : params(req, "driver")) drivers.add(key);
-        if ("1".equals(param(req, "driver_baseline"))) {
+        boolean hasDriverBaseline = "1".equals(param(req, "driver_baseline"));
+        if (hasDriverBaseline || req.getParameter("driver") != null) {
+            ArrayNode drivers = draft.putArray("driver_ids");
+            for (String key : params(req, "driver")) drivers.add(key);
+        }
+        if (hasDriverBaseline) {
             var baseline = draft.putArray("initial_driver_ids");
             for (String key : params(req, "initial_driver")) baseline.add(key);
         }

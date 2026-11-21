@@ -313,6 +313,20 @@ class HttpApiTest {
         return match.group(1);
     }
 
+    private static void assertRolePicker(String page, long person, String selected) {
+        int start = page.indexOf("name='role_" + person + "'");
+        assertTrue(start >= 0, "Missing role selector for member " + person);
+        String options = page.substring(start,page.indexOf("</select>",start));
+        for (String role : java.util.List.of("Machine Operator","Locator","Trencher","Missile Man"))
+            assertTrue(options.contains("value='" + role + "'"),role);
+        if (!selected.isEmpty()) assertTrue(options.contains("value='" + selected + "' selected"),selected);
+    }
+
+    private static void assertDailyRole(String report, String name, String role) {
+        assertTrue(report.contains("<li><span>" + Views.h(name) + "</span><span>" + role + "</span></li>"),
+            () -> name + " should be listed as " + role + " on the daily report");
+    }
+
     private void verifyMainlineForms(String today, long worker, long secondMember, long additionalMember) throws Exception {
         String form = "application/x-www-form-urlencoded";
         String newProject = "/mainline/projects/new";
@@ -337,13 +351,16 @@ class HttpApiTest {
         String editForm = request("GET", project + "/edit", null, null).body();
         assertTrue(editForm.contains("value='External lead'") && editForm.contains("list='supervisor-contractors'"));
         var picker = request("POST", assign,
-            "date=" + today + "&member=" + worker + "&picker=search&contractor_search=Casey", form);
+            "date=" + today + "&member=" + worker + "&role_" + worker + "=Machine+Operator&picker=search&contractor_search=Casey", form);
         assertEquals(200, picker.statusCode());
         assertTrue(picker.body().contains("name='member' value='" + worker + "' checked"));
         assertTrue(picker.body().contains("name='member' value='" + secondMember + "'>"));
+        assertRolePicker(picker.body(),worker,"Machine Operator");
+        assertRolePicker(picker.body(),secondMember,"");
         String member = "&action=create&member=" + worker;
-        String earlier = redirectTarget(request("POST", assign, "date=2000-01-01" + member, form));
-        String daily = redirectTarget(request("POST", assign, "date=" + today + member + "&member=" + secondMember, form));
+        String earlier = redirectTarget(request("POST", assign, "date=2000-01-01" + member + "&role_" + worker + "=Trencher", form));
+        String daily = redirectTarget(request("POST", assign, "date=" + today + member + "&member=" + secondMember
+            + "&role_" + worker + "=Machine+Operator&role_" + secondMember + "=Locator", form));
         assertTrue(daily.matches("/mainline/dailies/[0-9]+"));
         assertNotEquals(earlier, daily);
         String document = project + "/documents/fiber";
@@ -359,6 +376,7 @@ class HttpApiTest {
         assertAccessDenied(request("POST", daily, "action=save&revision=0&comments=Denied", form));
         assertAccessDenied(request("GET", crewPath, null, null));
         assertAccessDenied(request("POST", crewPath, "action=add&member=" + additionalMember, form));
+        assertAccessDenied(request("POST", crewPath, "action=roles&crew_revision=0&role_" + worker + "=Trencher", form));
         assertEquals(404,request("GET",earlier,null,null).statusCode());
         assertEquals(404,request("POST",earlier,"action=save&revision=0&total_footage=35",form).statusCode());
         assertAccessDenied(request("GET",project,null,null));
@@ -369,6 +387,9 @@ class HttpApiTest {
         login("alex");
         var report = request("GET",daily,null,null);
         assertEquals(200,report.statusCode());
+        assertTrue(report.body().contains("Team members (2)") && !report.body().contains(">Drivers<"));
+        assertDailyRole(report.body(),"Alex","Machine Operator");
+        assertDailyRole(report.body(),"Casey & Co","Locator");
         assertTrue(report.body().contains("href='" + document + "'"));
         assertTrue(report.body().contains("href='" + crewPath + "'"));
         String photoPage = daily + "/photos";
@@ -449,7 +470,8 @@ class HttpApiTest {
         assertTrue(revision.find(), "Crew form requires a roster revision");
         String revisionField = "&crew_revision=" + revision.group(1);
         String replacement = java.net.URLEncoder.encode("Devon (#" + additionalMember + ")", java.nio.charset.StandardCharsets.UTF_8);
-        String replace = "action=replace&departing_id=" + secondMember + "&replacement=" + replacement + revisionField;
+        String replace = "action=replace&departing_id=" + secondMember + "&replacement=" + replacement
+            + "&replacement_role=Missile+Man" + revisionField;
         assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, replace, form)));
         assertEquals(409, request("POST", crewPath, "action=remove&departing_id=" + additionalMember + revisionField, form).statusCode());
         // The report form was open before the swap. It can still save its in-progress field edits.
@@ -457,6 +479,8 @@ class HttpApiTest {
         assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,checked,form)));
         String after = request("GET",daily,null,null).body();
         assertTrue(after.contains("North crossing verified") && after.contains("15.23") && after.contains("Pictures (1)"));
+        assertDailyRole(after,"Devon","Missile Man");
+        assertDailyRole(after,"Alex","Machine Operator");
         login("casey");
         assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
         assertAccessDenied(request("GET", document, null, null));
@@ -479,7 +503,23 @@ class HttpApiTest {
         revision.reset(more.body());
         assertTrue(revision.find());
         assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, "action=add&member=" + additionalMember
-            + "&crew_revision=" + revision.group(1), form)));
+            + "&role_" + additionalMember + "=Trencher&crew_revision=" + revision.group(1), form)));
+        String roster = request("GET", crewPath, null, null).body();
+        assertRolePicker(roster,worker,"Machine Operator");
+        assertRolePicker(roster,additionalMember,"Trencher");
+        revision.reset(roster);
+        assertTrue(revision.find());
+        String roles = "action=roles&crew_revision=" + revision.group(1) + "&role_" + worker
+            + "=Locator&role_" + additionalMember + "=Missile+Man";
+        assertEquals(daily + "?crew=1",redirectTarget(request("POST",crewPath,roles,form)));
+        assertEquals(409,request("POST",crewPath,roles,form).statusCode());
+        assertRolePicker(request("GET",crewPath,null,null).body(),worker,"Locator");
+        assertRolePicker(request("GET",earlier + "/crew",null,null).body(),worker,"Trencher");
+        assertDailyRole(request("GET",earlier,null,null).body(),"Alex","Trencher");
+        assertDailyRole(request("GET",daily,null,null).body(),"Alex","Locator");
+        var previousCrew = request("POST",assign,"date=" + today + "&action=previous",form);
+        assertRolePicker(previousCrew.body(),worker,"Locator");
+        assertRolePicker(previousCrew.body(),additionalMember,"Missile Man");
         login("devon");
         assertTrue(request("GET","/",null,null).body().contains("Hill Road"));
         assertAccessDenied(request("GET",daily,null,null));
@@ -560,6 +600,7 @@ class HttpApiTest {
         var picker = request("GET", assign, null, null);
         assertEquals(200, picker.statusCode());
         assertTrue(picker.body().contains("Blair") && picker.body().contains("Alex"));
+        assertRolePicker(picker.body(),blair,"");
         assertFalse(picker.body().contains("alex@example.test") || picker.body().contains("href='/people/new'"));
         for (String restricted : java.util.List.of(projects, projects + "/new", edit, "/teams/new", "/people",
                 "/payroll", unrelated, unrelated + "/dailies/new", unrelatedDaily, unrelatedDaily + "/crew",
@@ -578,14 +619,18 @@ class HttpApiTest {
         assertTrue(redirectTarget(request("POST", assign, "date=" + tomorrow + "&member=" + alex, form)).startsWith(project));
 
         // The server includes the supervisor even when the form posts no manually selected members.
-        String solo = redirectTarget(request("POST", assign, "date=" + today + "&action=create", form));
+        String solo = redirectTarget(request("POST", assign, "date=" + today + "&action=create&role_" + blair + "=Trencher", form));
         assertTrue(solo.matches("/mainline/dailies/[0-9]+"));
         var report = request("GET", solo, null, null);
         assertEquals(200, report.statusCode());
         assertTrue(report.body().contains("Team members (1)") && report.body().contains("Blair"));
+        assertDailyRole(report.body(),"Blair","Trencher");
         String update = "action=save&revision=0&comments=Supervisor+field+notes&driver=" + blair;
         assertEquals(solo + "?saved=1", redirectTarget(request("POST", solo, update, form)));
-        assertEquals(solo + "?crew=1", redirectTarget(request("POST", solo + "/crew", "action=add&member=" + casey, form)));
+        assertEquals(solo + "?crew=1", redirectTarget(request("POST", solo + "/crew", "action=add&crew_revision=0&member=" + casey + "&role_" + casey + "=Locator", form)));
+        var currentCrew = request("GET", solo + "/crew",null,null).body();
+        assertRolePicker(currentCrew,casey,"Locator");
+        assertRolePicker(currentCrew,blair,"Trencher");
         login("casey");
         assertAccessDenied(request("GET", solo, null, null));
         assertAccessDenied(request("POST", solo + "/crew", "action=add&member=" + devon, form));

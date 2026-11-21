@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import static fieldops.StoreSql.*;
 
@@ -18,6 +19,7 @@ final class Mainline {
     static final List<String> STATES = List.of("Not Started", "In Progress", "Completed");
     static final List<String> PRIORITIES = List.of("HIGH", "MEDIUM", "LOW");
     static final List<String> EXPENSE_TYPES = List.of("Gas", "Supplies", "Maintenance", "Hotel", "Other");
+    static final List<String> CREW_ROLES = List.of("Machine Operator", "Locator", "Trencher", "Missile Man");
 
     private static final String PROJECTS = """
         SELECT p.*, (SELECT coalesce(sum(d.footage_hundredths),0) FROM mainline_dailies d WHERE d.project_id=p.id) AS total_hundredths
@@ -184,8 +186,23 @@ final class Mainline {
                 }
                 if (!java.util.Objects.equals(oldSupervisor, assigned)) {
                     String today = Db.today();
+                    if (oldSupervisor != null) {
+                        // Keep the outgoing supervisor's role in the roster for completed work dates.
+                        change(db, """
+                            UPDATE mainline_daily_members SET supervisor_only=0
+                            WHERE person_id=? AND supervisor_only=1 AND removed=0 AND crew_role<>'' AND daily_id IN
+                                (SELECT id FROM mainline_dailies WHERE project_id=? AND date<?)
+                            """,oldSupervisor,projectId,today);
+                        // Preserve the earlier assignment on open schedules without restoring it on
+                        // a past day if the same supervisor is later put back on the project.
+                        change(db, """
+                            UPDATE mainline_daily_members SET removed=1
+                            WHERE person_id=? AND supervisor_only=1 AND removed=0 AND crew_role<>'' AND daily_id IN
+                                (SELECT id FROM mainline_dailies WHERE project_id=? AND date>=?)
+                            """,oldSupervisor,projectId,today);
+                    }
                     change(db, """
-                        DELETE FROM mainline_daily_members WHERE supervisor_only=1 AND is_driver=0 AND daily_id IN
+                        DELETE FROM mainline_daily_members WHERE supervisor_only=1 AND is_driver=0 AND crew_role='' AND daily_id IN
                             (SELECT id FROM mainline_dailies WHERE project_id=? AND date>=?)
                         """, projectId, today);
                     if (assigned != null) change(db, """
@@ -328,8 +345,8 @@ final class Mainline {
             byId.put(row.path("id").asLong(),row);
         }
         for (var node: rows(db,"""
-                SELECT m.daily_id,m.person_id AS id,m.name,m.is_driver,m.supervisor_only,m.removed,
-                       CASE WHEN m.supervisor_only=1 AND (p.supervisor_person_id IS NULL OR p.supervisor_person_id<>m.person_id)
+                SELECT m.daily_id,m.person_id AS id,m.name,m.crew_role,m.is_driver,m.supervisor_only,m.removed,
+                       CASE WHEN m.supervisor_only=1 AND (m.removed=1 OR p.supervisor_person_id IS NULL OR p.supervisor_person_id<>m.person_id)
                             THEN 1 ELSE 0 END AS former_supervisor
                 FROM mainline_dailies d JOIN mainline_projects p ON p.id=d.project_id
                 JOIN mainline_daily_members m ON m.daily_id=d.id
@@ -343,7 +360,8 @@ final class Mainline {
             member.put("former_supervisor",former);
             boolean removed = member.path("removed").asInt()==1;
             member.put("removed",removed);
-            if ((removed && (scheduleOnly || !driver)) || (scheduleOnly && former)) continue;
+            if (scheduleOnly && (removed || former)) continue;
+            if (removed && !driver && !(former && !member.path("crew_role").asText().isEmpty())) continue;
             daily.withArray("members").add(member);
             if(driver) daily.withArray("driver_ids").add(member.path("id").asLong());
         }
@@ -358,8 +376,8 @@ final class Mainline {
     }
 
     static ObjectNode createDaily(Connection db,ObjectNode user,ObjectNode input) throws SQLException {
-        if (admin(user)) StoreInput.fields(input,"project_id","date","member_ids","vehicle_ids","driver_ids","expenses","priority","comments","total_footage");
-        else StoreInput.fields(input,"project_id","date","member_ids","vehicle_ids");
+        if (admin(user)) StoreInput.fields(input,"project_id","date","member_ids","member_roles","vehicle_ids","driver_ids","expenses","priority","comments","total_footage");
+        else StoreInput.fields(input,"project_id","date","member_ids","member_roles","vehicle_ids");
         long projectId=StoreInput.integer(input.get("project_id"),"project_id");
         String date=StoreInput.date(StoreInput.text(input,"date",10,10));
         var members=StoreInput.ids(input,"member_ids",0,Integer.MAX_VALUE);
@@ -378,11 +396,12 @@ final class Mainline {
             }
             if (members.isEmpty()) throw new Problem(422,"Select at least one contractor for this daily crew.");
             if (!members.containsAll(drivers)) throw new Problem(422,"Select drivers from the daily crew.");
+            var roles = crewRoles(input.get("member_roles"), members);
             long id=insertId(db,"""
                 INSERT INTO mainline_dailies(project_id,date,footage_hundredths,expenses,priority,comments)
                 VALUES(?,?,?,?,?,?)
                 """,projectId,date,values.footage,values.expenses,values.priority,values.comments);
-            insertDailyMembers(db, id, members, drivers, autoMember);
+            insertDailyMembers(db, id, members, drivers, autoMember, roles);
             if (!vehicles.isEmpty()) {
                 var available=new HashMap<Long,JsonNode>();
                 for (var vehicle:Vehicles.list(db,date)) available.put(vehicle.path("id").asLong(),vehicle);
@@ -399,13 +418,36 @@ final class Mainline {
         });
     }
 
-    private static void insertDailyMembers(Connection db, long dailyId, Set<Long> members, Set<Long> drivers, Long autoMember) throws SQLException {
+    private static String crewRole(String role) {
+        if (!role.isEmpty() && !CREW_ROLES.contains(role)) throw new Problem(422, "Choose a role from the team member's role list.");
+        return role;
+    }
+
+    // Only keys for the selected people (including the project's automatic supervisor) may be written.
+    private static Map<Long,String> crewRoles(JsonNode submitted, Set<Long> allowed) {
+        if (submitted == null) return Map.of();
+        if (!(submitted instanceof ObjectNode roles)) throw StoreInput.invalid("member_roles");
+        var result = new HashMap<Long,String>();
+        for (var entry : roles.properties()) {
+            long person;
+            try { person = Long.parseLong(entry.getKey()); }
+            catch (NumberFormatException err) { throw StoreInput.invalid("member_roles"); }
+            if (!Long.toString(person).equals(entry.getKey()) || !allowed.contains(person) || !entry.getValue().isTextual())
+                throw new Problem(422,"Assign roles only to the selected team members.");
+            result.put(person, crewRole(entry.getValue().textValue()));
+        }
+        return result;
+    }
+
+    private static void insertDailyMembers(Connection db, long dailyId, Set<Long> members, Set<Long> drivers, Long autoMember,
+                                           Map<Long,String> roles) throws SQLException {
         try (var stmt = db.prepareStatement("""
-            INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver,supervisor_only)
-            SELECT ?,id,name,?,? FROM people WHERE id=? AND is_admin=0
+            INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver,supervisor_only,crew_role)
+            SELECT ?,id,name,?,?,? FROM people WHERE id=? AND is_admin=0
             """)) {
             for (long person : members) {
-                bind(stmt, dailyId, drivers.contains(person) ? 1 : 0, java.util.Objects.equals(person, autoMember) ? 1 : 0, person);
+                bind(stmt, dailyId, drivers.contains(person) ? 1 : 0, java.util.Objects.equals(person, autoMember) ? 1 : 0,
+                     roles.getOrDefault(person,""), person);
                 stmt.addBatch();
             }
             for (int result : stmt.executeBatch())
@@ -418,39 +460,50 @@ final class Mainline {
     }
 
     static ObjectNode addMembers(Connection db, ObjectNode user, long dailyId, ArrayNode memberIds, Long crewRevision) throws SQLException {
+        return addMembers(db,user,dailyId,memberIds,null,crewRevision);
+    }
+
+    static ObjectNode addMembers(Connection db, ObjectNode user, long dailyId, ArrayNode memberIds,
+                                 ObjectNode submittedRoles, Long crewRevision) throws SQLException {
         return transaction(db, true, () -> {
             requireCrewManagement(db,user,dailyId);
+            if (submittedRoles != null && !submittedRoles.isEmpty() && crewRevision == null)
+                throw new Problem(409,"Reopen the daily crew to assign roles.");
             if (crewRevision != null)
                 checkCrewRevision(one(db,"SELECT crew_revision FROM mainline_dailies WHERE id=?",dailyId),crewRevision);
             if (memberIds == null || memberIds.isEmpty()) throw new Problem(422, "Select contractors to add to this daily.");
             var additions = new LinkedHashSet<Long>();
             for (JsonNode id : memberIds) additions.add(StoreInput.integer(id, "member_ids"));
-            if (addToRoster(db,user,dailyId,additions,crewRevision != null)) advanceCrewRevision(db,dailyId);
+            var roles = crewRoles(submittedRoles,additions);
+            if (addToRoster(db,user,dailyId,additions,crewRevision != null,roles)) advanceCrewRevision(db,dailyId);
             return admin(user) ? readDaily(db, user, dailyId) : readCrewDaily(db, user, dailyId);
         });
     }
 
-    // Called with the writer lock held. Reinstating a member keeps the name and driver credit originally recorded.
+    // Called with the writer lock held. A new role selection overrides the role saved before removal.
     private static boolean addToRoster(Connection db, ObjectNode user, long dailyId, Set<Long> additions,
-                                       boolean canRestoreRemoved) throws SQLException {
+                                       boolean canRestoreRemoved, Map<Long,String> roles) throws SQLException {
         boolean restored = false;
-        for (var member : rows(db, "SELECT person_id,supervisor_only,removed FROM mainline_daily_members WHERE daily_id=?", dailyId)) {
+        for (var member : rows(db, "SELECT person_id,supervisor_only,removed,crew_role FROM mainline_daily_members WHERE daily_id=?", dailyId)) {
             long person = member.path("person_id").asLong();
             if (!additions.remove(person)) continue;
             if (member.path("removed").asInt()==1 && !canRestoreRemoved)
                 throw new Problem(409,"The crew changed. Reopen the crew before adding a removed member again.");
             boolean explicit = member.path("supervisor_only").asInt()==1 && (admin(user) || person!=user.path("id").asLong());
-            if (member.path("removed").asInt()==1 || explicit) {
+            boolean restore = member.path("removed").asInt()==1;
+            String originalRole = member.get("crew_role").asText();
+            String role = roles.getOrDefault(person,originalRole);
+            if (restore || explicit || !role.equals(originalRole)) {
                 int updated = change(db, """
-                    UPDATE mainline_daily_members SET removed=0,supervisor_only=0 WHERE daily_id=? AND person_id=?
+                    UPDATE mainline_daily_members SET removed=0,supervisor_only=?,crew_role=? WHERE daily_id=? AND person_id=?
                       AND EXISTS(SELECT 1 FROM people WHERE id=? AND is_admin=0)
-                    """,dailyId,person,person);
+                    """,restore || explicit ? 0 : member.path("supervisor_only").asInt(),role,dailyId,person,person);
                 if (updated!=1) throw new Problem(422,"Select a valid contractor for the daily crew.");
                 restored = true;
             }
         }
         if (!additions.isEmpty()) {
-            insertDailyMembers(db,dailyId,additions,Set.of(),null);
+            insertDailyMembers(db,dailyId,additions,Set.of(),null,roles);
             return true;
         }
         return restored;
@@ -467,6 +520,11 @@ final class Mainline {
 
     static ObjectNode changeMember(Connection db, ObjectNode user, long dailyId, long departingId,
                                    Long replacementId, long crewRevision) throws SQLException {
+        return changeMember(db,user,dailyId,departingId,replacementId,null,crewRevision);
+    }
+
+    static ObjectNode changeMember(Connection db, ObjectNode user, long dailyId, long departingId,
+                                   Long replacementId, String replacementRole, long crewRevision) throws SQLException {
         return transaction(db,true,()->{
             var daily = readCrewDaily(db,user,dailyId);
             checkCrewRevision(daily,crewRevision);
@@ -477,11 +535,42 @@ final class Mainline {
             if (!active.contains(departingId)) throw new Problem(409,"This contractor is no longer on this daily crew.");
             if (replacementId!=null) {
                 if (active.contains(replacementId)) throw new Problem(422,"Choose a replacement who is not already on the crew.");
-                addToRoster(db,user,dailyId,new LinkedHashSet<>(Set.of(replacementId)),true);
-            }
+                var roles = replacementRole == null ? Map.<Long,String>of() : Map.of(replacementId,crewRole(replacementRole));
+                addToRoster(db,user,dailyId,new LinkedHashSet<>(Set.of(replacementId)),true,roles);
+            } else if (replacementRole != null && !replacementRole.isEmpty())
+                throw new Problem(422,"Select a replacement before assigning a replacement role.");
             change(db,"UPDATE mainline_daily_members SET removed=1 WHERE daily_id=? AND person_id=?",dailyId,departingId);
             advanceCrewRevision(db,dailyId);
             return readCrewDaily(db,user,dailyId);
+        });
+    }
+
+    static ObjectNode updateCrewRoles(Connection db, ObjectNode user, long dailyId, ObjectNode submittedRoles,
+                                      long crewRevision) throws SQLException {
+        return transaction(db,true,()->{
+            var daily = readCrewDaily(db,user,dailyId);
+            checkCrewRevision(daily,crewRevision);
+            var current = new HashMap<Long,ObjectNode>();
+            for (var member : daily.path("members")) current.put(member.get("id").asLong(),(ObjectNode)member);
+            var roles = crewRoles(submittedRoles,current.keySet());
+            boolean changed = false;
+            try (var update = db.prepareStatement("UPDATE mainline_daily_members SET crew_role=? WHERE daily_id=? AND person_id=?")) {
+                for (var entry : roles.entrySet()) {
+                    var member = current.get(entry.getKey());
+                    if (!entry.getValue().equals(member.get("crew_role").asText())) {
+                        bind(update,entry.getValue(),dailyId,entry.getKey());
+                        update.addBatch();
+                        member.put("crew_role",entry.getValue());
+                        changed = true;
+                    }
+                }
+                if (changed) update.executeBatch();
+            }
+            if (changed) {
+                advanceCrewRevision(db,dailyId);
+                daily.put("crew_revision",crewRevision+1);
+            }
+            return daily;
         });
     }
 

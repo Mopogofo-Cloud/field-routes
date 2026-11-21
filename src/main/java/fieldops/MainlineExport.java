@@ -129,11 +129,12 @@ final class MainlineExport {
             for (var d : report.days()) rows.write(d.get("id"),d.get("date"),d.get("total_footage"),d.get("priority"),d.get("comments"));
         }));
         sheets.add(new ExcelWorkbook.Sheet("Crew", rows -> {
-            rows.write("Daily ID","Date","Crew member","Driver","Crew status");
+            rows.write("Daily ID","Date","Crew member","Driver","Crew status","Daily role");
             for (var d : report.days()) for (var member : d.path("members")) {
                 String status = member.path("removed").asBoolean() ? "Removed from crew" :
                     member.path("former_supervisor").asBoolean() ? "Former supervisor" : "Assigned";
-                rows.write(d.get("id"),d.get("date"),member.get("name"),member.path("is_driver").asBoolean() ? "Yes" : "No",status);
+                rows.write(d.get("id"),d.get("date"),member.get("name"),member.path("is_driver").asBoolean() ? "Yes" : "No",
+                    status,member.path("crew_role").asText(""));
             }
         }));
         sheets.add(new ExcelWorkbook.Sheet("Vehicles", rows -> {

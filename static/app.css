@@ -39,6 +39,15 @@ fieldset { min-width: 0; border: 1px solid var(--line); border-radius: .5rem; pa
 .choices input { width: 1.15rem; height: 1.15rem; accent-color: var(--teal); }
 .contractor-search { display: flex; flex-wrap: wrap; align-items: end; gap: .55rem; }
 .contractor-search label { flex: 1 1 14rem; min-width: 0; }
+.crew-role-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, min(47%, 13rem)); align-items: center; gap: .65rem; }
+.crew-role-row > :first-child { overflow-wrap: anywhere; }
+.crew-role-row > select { margin: 0; }
+.crew-role-row:has(input[name='member']:not(:checked)) { grid-template-columns: 1fr; }
+.crew-role-row:has(input[name='member']:not(:checked)) > select { display: none; }
+.daily-team-members { list-style: none; margin: .5rem 0 0; padding: 0; }
+.daily-team-members li { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+.daily-team-members li span { min-width: 0; overflow-wrap: anywhere; }
+.daily-team-members li span:last-child { text-align: right; color: var(--muted); }
 .masthead { background: #142d2a; color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 4.4rem; padding: .65rem max(4vw, calc((100vw - 1160px) / 2)); }
 .brand { text-decoration: none; color: white; display: inline-flex; align-items: center; gap: .65rem; font-weight: 720; font-size: 1.25rem; letter-spacing: -.04em; white-space: nowrap; }
 .mark { width: 1.8rem; height: 1.6rem; display: grid; gap: 3px; transform: skew(-18deg); align-content: center; }

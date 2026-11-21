@@ -30,6 +30,9 @@ final class MainlineDailyViews {
         for (String member : params(req, "member")) {
             if (!member.equals(Long.toString(supervisorId))) members.add(member);
         }
+        var roles = draft.putObject("member_roles");
+        for (var member : members) submittedRole(req, roles, member.asText());
+        if (supervisorId != 0) submittedRole(req, roles, Long.toString(supervisorId));
         collectIds(req, "vehicle", draft.putArray("vehicle_ids"));
         String picker = param(req, "picker");
         String action = param(req, "action");
@@ -38,9 +41,12 @@ final class MainlineDailyViews {
             var latest = project.path("latest_daily");
             if (latest.isObject()) {
                 members.removeAll();
+                roles.removeAll();
                 for (var member : latest.path("members")) {
-                    if (!member.path("supervisor_only").asBoolean() && member.path("id").asLong() != supervisorId)
-                        members.add(member.path("id"));
+                    boolean supervisor = member.path("id").asLong() == supervisorId;
+                    if (!supervisor && member.path("supervisor_only").asBoolean()) continue;
+                    if (!supervisor) members.add(member.path("id"));
+                    roles.put(value(member, "id"), value(member, "crew_role"));
                 }
                 copyIds(latest.path("vehicles"), draft.putArray("vehicle_ids"));
             }
@@ -69,15 +75,19 @@ final class MainlineDailyViews {
         var form = new StringBuilder("<form class='panel stack editor' method='post'>").append(alert(problem))
             .append("<p class='helper'>Select the contractors working on this project for the work date.</p>")
             .append(field("Work date", "date", date, "type='date' required" + (admin ? "" : " min='" + h(today) + "'")));
-        if (supervisorId != 0) form.append("<p><strong>Supervisor on this crew</strong> · ")
-            .append(h(value(project, "supervisor"))).append(" (added automatically)</p>");
+        if (supervisorId != 0) {
+            String person = Long.toString(supervisorId), name = value(project, "supervisor");
+            form.append("<div class='crew-role-row'><p><strong>Supervisor on this crew</strong><br>")
+                .append(h(name)).append(" (added automatically)</p>")
+                .append(roleSelect("role_" + person, name, value(roles, person))).append("</div>");
+        }
         form.append("<div class='actions'>");
         if (project.path("latest_daily").isObject())
             form.append("<button class='secondary' name='action' value='previous' formnovalidate>Reuse crew and vehicles from ")
                 .append(h(value(project.path("latest_daily"), "date"))).append("</button>");
         var candidates = candidates(db, admin, Set.of(supervisorId));
         form.append("</div>");
-        if (!candidates.isEmpty() || supervisorId == 0) form.append(AdminViews.contractorPicker(candidates, draft,
+        if (!candidates.isEmpty() || supervisorId == 0) form.append(contractorPicker(candidates, draft,
             picker.equals("all") ? "" : param(req, "contractor_search"), admin));
         form.append("<fieldset class='stack'><legend>Vehicles</legend><div class='actions'><button class='secondary' name='action' value='availability' formnovalidate>Check availability for date</button></div>");
         var vehicles = Vehicles.list(db, vehicleDate);
@@ -113,6 +123,24 @@ final class MainlineDailyViews {
         for (var record : records) target.add(record.path("id"));
     }
 
+    private static void submittedRole(HttpServletRequest req, ObjectNode roles, String person) {
+        String role = req.getParameter("role_" + person);
+        if (role != null) roles.put(person, role);
+    }
+
+    private static String contractorPicker(ArrayNode candidates, ObjectNode draft, String query, boolean admin) {
+        return AdminViews.contractorPicker(candidates, draft, query, admin,
+            (person, name) -> roleSelect("role_" + person, name, value(draft.path("member_roles"), person)));
+    }
+
+    private static String roleSelect(String fieldName, String contractor, String selected) {
+        var out = new StringBuilder("<select name='").append(h(fieldName))
+            .append("' aria-label='Daily role for ").append(h(contractor)).append("'>")
+            .append(option("", "Choose role", selected));
+        for (String role : Mainline.CREW_ROLES) out.append(option(role, role, selected));
+        return out.append("</select>").toString();
+    }
+
     private static Set<String> idSet(JsonNode list) {
         var result = new HashSet<String>();
         for (var id : list) result.add(id.asText());
@@ -137,9 +165,13 @@ final class MainlineDailyViews {
         var draft = App.JSON.createObjectNode();
         var selected = draft.putArray("member_ids");
         collectIds(req, "member", selected);
+        var addedRoles = draft.putObject("member_roles");
+        for (var member : selected) submittedRole(req, addedRoles, member.asText());
+        var editedRoles = App.JSON.createObjectNode();
         String picker = param(req, "picker");
         String departing = param(req, "departing_id");
         String replacement = param(req, "replacement").strip();
+        String replacementRole = param(req, "replacement_role");
         String problem = "";
         var assigned = new HashSet<Long>();
         for (var member : daily.path("members")) assigned.add(member.path("id").asLong());
@@ -150,7 +182,11 @@ final class MainlineDailyViews {
                 String action = param(req, "action");
                 String version = param(req, "crew_revision");
                 if (action.isEmpty() || action.equals("add")) {
-                    Mainline.addMembers(db, user, dailyId, selected, version.isEmpty() ? null : id(version));
+                    Mainline.addMembers(db, user, dailyId, selected, addedRoles, version.isEmpty() ? null : id(version));
+                } else if (action.equals("roles")) {
+                    if (version.isEmpty()) throw new Problem(409, "Reopen the crew to update its roles.");
+                    for (var member : daily.path("members")) submittedRole(req, editedRoles, value(member, "id"));
+                    Mainline.updateCrewRoles(db, user, dailyId, editedRoles, id(version));
                 } else if (action.equals("remove") || action.equals("replace")) {
                     if (version.isEmpty() || id(version) != daily.path("crew_revision").asLong())
                         throw new Problem(409, "The crew changed. Review the current crew and choose the member again.");
@@ -160,7 +196,8 @@ final class MainlineDailyViews {
                         throw new Problem(422, "Choose a replacement from the contractor suggestions.");
                     if (action.equals("remove") && !replacement.isEmpty())
                         throw new Problem(422, "Choose Replace member to use the selected replacement, or clear the replacement field.");
-                    Mainline.changeMember(db, user, dailyId, id(departing), incoming, id(version));
+                    Mainline.changeMember(db, user, dailyId, id(departing), incoming,
+                        incoming == null ? null : req.getParameter("replacement_role"), id(version));
                 } else throw new Problem(422, "Choose a crew action.");
                 redirect(res, backPath + "?crew=1");
                 return;
@@ -175,33 +212,43 @@ final class MainlineDailyViews {
                     candidates = candidates(db, admin, assigned);
                     replacements = replacementChoices(candidates);
                     selected.removeAll();
+                    editedRoles.removeAll();
                     departing = "";
                     replacement = "";
+                    replacementRole = "";
                 }
             }
         }
 
         String title = "Manage crew";
-        long supervisor = daily.path("supervisor_person_id").asLong();
         var form = new StringBuilder("<div class='stack editor'>").append(alert(problem))
             .append("<section class='panel stack'><h2>Current crew (").append(daily.path("members").size()).append(")</h2><p>")
-            .append(h(value(daily, "project_name"))).append(" · ").append(h(value(daily, "date"))).append("</p><ul>");
-        for (var member : daily.path("members")) {
-            form.append("<li>").append(h(value(member, "name")));
-            if (member.path("id").asLong() == supervisor) form.append(" · Project supervisor");
-            form.append("</li>");
-        }
-        form.append("</ul></section>");
-        form.append(changeMemberForm(daily, replacements, departing, replacement));
+            .append(h(value(daily, "project_name"))).append(" · ").append(h(value(daily, "date"))).append("</p>")
+            .append(currentRoleForm(daily, editedRoles)).append("</section>")
+            .append(changeMemberForm(daily, replacements, departing, replacement, replacementRole));
         form.append("<section class='panel stack'><h2>Add team members</h2>");
         if (candidates.isEmpty()) form.append("<p>All contractors are on this daily crew.</p>");
         else form.append("<form class='stack' method='post'>").append(hidden("crew_revision", value(daily, "crew_revision")))
-            .append(AdminViews.contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
+            .append(contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
             .append("<div class='actions'><button name='action' value='add'>Add to daily crew</button></div></form>");
         form.append("</section></div>");
         String heading = admin ? MainlineViews.heading(title, backLabel, backPath, "") :
             MainlineViews.workerHeading(title, backLabel, backPath, "");
         page(res, user, title, heading + form);
+    }
+
+    private static String currentRoleForm(ObjectNode daily, ObjectNode edits) {
+        if (daily.path("members").isEmpty()) return "<p>No team members assigned.</p>";
+        var out = new StringBuilder("<form class='stack' method='post'>")
+            .append(hidden("crew_revision", value(daily, "crew_revision")));
+        for (var member : daily.path("members")) {
+            String key = value(member, "id"), name = value(member, "name");
+            String role = edits.has(key) ? value(edits, key) : value(member, "crew_role");
+            out.append("<label class='crew-role-row'><span>").append(h(name));
+            if (member.path("id").asLong() == daily.path("supervisor_person_id").asLong()) out.append(" · Project supervisor");
+            out.append("</span>").append(roleSelect("role_" + key, name, role)).append("</label>");
+        }
+        return out.append("<div class='actions'><button name='action' value='roles'>Save crew roles</button></div></form>").toString();
     }
 
     private static Map<String, Long> replacementChoices(ArrayNode candidates) {
@@ -222,7 +269,7 @@ final class MainlineDailyViews {
     }
 
     private static String changeMemberForm(ObjectNode daily, Map<String, Long> replacements,
-                                           String departing, String replacement) {
+                                           String departing, String replacement, String replacementRole) {
         long supervisor = daily.path("supervisor_person_id").asLong();
         var options = new StringBuilder();
         for (var member : daily.path("members")) {
@@ -240,7 +287,8 @@ final class MainlineDailyViews {
                 "list='crew-replacements' maxlength='512' placeholder='Type a first or last name' autocomplete='off'"))
                 .append("<datalist id='crew-replacements'>");
             for (String choice : replacements.keySet()) form.append("<option value='").append(h(choice)).append("'></option>");
-            form.append("</datalist>");
+            form.append("</datalist><label>Replacement role")
+                .append(roleSelect("replacement_role", "replacement contractor", replacementRole)).append("</label>");
         }
         form.append("<div class='actions'>");
         if (!replacements.isEmpty()) form.append("<button name='action' value='replace'>Replace member</button>");
@@ -292,6 +340,8 @@ final class MainlineDailyViews {
             .append(field("Total footage (ft)", "total_footage", value(draft,"total_footage"), "type='number' min='0' step='0.01'"));
         var activeDrivers = new StringBuilder();
         var previousDrivers = new StringBuilder();
+        var roster = new StringBuilder();
+        var formerRoster = new StringBuilder();
         int activeCount = 0;
         form.append(hidden("driver_baseline", "1"));
         if (draft.has("initial_driver_ids")) {
@@ -301,26 +351,35 @@ final class MainlineDailyViews {
                 if (member.path("is_driver").asBoolean() && !member.path("removed").asBoolean())
                     form.append(hidden("initial_driver", value(member,"id")));
         }
-        var drivers = idSet(draft.path("driver_ids"));
+        var drivers = idSet(draft.has("driver_ids") ? draft.path("driver_ids") : daily.path("driver_ids"));
         for (var member : daily.path("members")) {
             String key = value(member,"id");
             String name = h(value(member,"name"));
-            if (member.path("removed").asBoolean()) {
-                previousDrivers.append("<p>").append(name).append(" · Removed from crew</p>");
+            String role = value(member, "crew_role");
+            boolean removed = member.path("removed").asBoolean();
+            boolean former = member.path("former_supervisor").asBoolean();
+            String status = removed ? " · Removed from crew" : former ? " · Former project supervisor" : "";
+            var members = status.isEmpty() ? roster : formerRoster;
+            members.append("<li><span>").append(name).append(status).append("</span><span>")
+                .append(role.isEmpty() ? "Role unassigned" : h(role)).append("</span></li>");
+            if (status.isEmpty()) activeCount++;
+            if (removed) {
+                if (member.path("is_driver").asBoolean()) previousDrivers.append("<p>").append(name).append(status).append("</p>");
                 continue;
             }
-            boolean former = member.path("former_supervisor").asBoolean();
-            if (!former) activeCount++;
+            if (former && !member.path("is_driver").asBoolean()) continue;
             var list = former ? previousDrivers : activeDrivers;
             list.append("<label><input type='checkbox' name='driver' value='").append(h(key))
-                .append(drivers.contains(key) ? "' checked>" : "'>").append(name)
-                .append(former ? " · Former project supervisor" : "").append("</label>");
+                .append(drivers.contains(key) ? "' checked>" : "'>").append(name).append(status).append("</label>");
         }
         form.append("<details open><summary>Team members (").append(activeCount).append(")</summary>")
-            .append("<fieldset><legend>Drivers</legend><div class='choices'>").append(activeDrivers).append("</div></fieldset></details>");
-        if (!previousDrivers.isEmpty()) form.append("<fieldset><legend>Previously recorded drivers</legend>")
+            .append("<ul class='daily-team-members'>").append(roster).append("</ul>");
+        if (!formerRoster.isEmpty()) form.append("<h3>Previously assigned</h3><ul class='daily-team-members'>")
+            .append(formerRoster).append("</ul>");
+        form.append("</details><details><summary>Driving credit</summary><div class='choices'>").append(activeDrivers).append("</div>");
+        if (!previousDrivers.isEmpty()) form.append("<fieldset><legend>Previously recorded credit</legend>")
             .append(previousDrivers).append("</fieldset>");
-        form.append(vehicleLine(daily));
+        form.append("</details>").append(vehicleLine(daily));
         form.append(report.expenses())
             .append("<label>Priority<select name='priority'>").append(option("","Select priority",value(draft,"priority")));
         for (var priority : Mainline.PRIORITIES) form.append(option(priority,priority,value(draft,"priority")));

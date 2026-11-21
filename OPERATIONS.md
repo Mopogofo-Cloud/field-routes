@@ -58,6 +58,8 @@ For project supervisor access, apply [the supervisor migration](deploy/migration
 
 For daily crew removals and replacements, apply [the crew changes migration](deploy/migrations/20261121-mainline-crew-changes.sql) before deploying the updated Java service. Existing crew members start active. The crew has its own revision so roster changes can be saved while a report is open for editing.
 
+For Mainline daily roles, apply [the daily roles migration](deploy/migrations/20261121-mainline-daily-roles.sql) before deploying the Java service. Each crew assignment stores its role for that daily. Existing assignments start with an empty role.
+
 ### Connect private Cloudflare R2 storage
 
 1. Enable R2 in the Cloudflare account and sign in as the configured Field Routes owner. Open **Photo storage** in the account header.
