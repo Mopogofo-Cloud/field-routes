@@ -1,0 +1,33 @@
+.weekly-payroll { display: grid; gap: 1rem; }
+.weekly-payroll .section-head { margin-bottom: .5rem; }
+.weekly-payroll h1, .weekly-payroll h2, .weekly-payroll p { margin-block: .25rem; }
+.payroll-links { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+.payroll-scroll { max-width: 100%; overflow-x: auto; }
+.payroll-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.payroll-table td, .payroll-table th { text-align: left; vertical-align: top; padding: .65rem .5rem; border-bottom: 1px solid var(--line); }
+.payroll-table thead { color: var(--muted); font-size: .9rem; }
+.payroll-table td, .payroll-table th, .payroll-table code { overflow-wrap: anywhere; }
+.payroll-warning { color: #79480c; }
+.payroll-metrics { display: flex; gap: 1rem 2.3rem; flex-wrap: wrap; }
+.payroll-metrics span, .payroll-metrics strong { display: block; }
+.payroll-metrics span { font-size: .9rem; color: var(--muted); }
+.payroll-metrics strong { font-size: 1.3rem; }
+@media (max-width: 650px) {
+  .payroll-scroll { font-size: .91rem; }
+  .weekly-payroll .payroll-table { min-width: 34rem; }
+  .pay-statement .payroll-table { min-width: 28rem; }
+}
+@media print {
+  @page { margin: .65in; }
+  .masthead, .payroll-screen-only { display: none !important; }
+  body, main, .weekly-payroll, .pay-statement { background: white; color: #111; padding: 0; margin: 0; width: auto; max-width: none; }
+  main, .weekly-payroll, .pay-statement { display: block; }
+  .pay-statement { border: 0; box-shadow: none; }
+  .pay-statement header, .payroll-metrics { margin-bottom: 1.5rem; break-inside: avoid; }
+  .weekly-payroll .payroll-table { min-width: 0; }
+  .payroll-scroll { overflow: visible; font-size: 9.5pt; }
+  .payroll-table thead { display: table-header-group; }
+  .payroll-table tr { break-inside: avoid; }
+  .payroll-table td, .payroll-table th { border-color: #aaa; }
+  .pay-statement h1, .pay-statement h2 { break-after: avoid; }
+}

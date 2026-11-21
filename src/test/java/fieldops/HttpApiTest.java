@@ -1,0 +1,416 @@
+package fieldops;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class HttpApiTest {
+    @TempDir Path temp;
+    private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+    private String base;
+    private String cookie = "";
+
+    Connection fixtureDatabase() throws Exception {
+        return DriverManager.getConnection("jdbc:sqlite:" + temp.resolve("fieldops.sqlite3"));
+    }
+
+    void configureDatabase(ProcessBuilder launch) {
+        launch.environment().keySet().removeIf(key -> key.startsWith("FIELDOPS_POSTGRES_"));
+        launch.environment().put("FIELDOPS_DATA_DIR", temp.toString());
+    }
+
+    private HttpResponse<String> request(String method, String path, String data, String type) throws Exception {
+        var builder = HttpRequest.newBuilder(URI.create(base + path)).timeout(Duration.ofSeconds(15));
+        if (!cookie.isEmpty()) builder.header("Cookie", cookie);
+        if (type != null) builder.header("Content-Type", type);
+        builder.method(method, data == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(data));
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private JsonNode api(String method, String path, String payload, int status) throws Exception {
+        var res = request(method, "/api" + path, payload, payload == null ? null : "application/json");
+        assertEquals(status, res.statusCode(), res.body());
+        return App.JSON.readTree(res.body());
+    }
+
+    private String login(String name) throws Exception {
+        var data = App.JSON.createObjectNode().put("username", name).put("password", "integration-password");
+        var res = request("POST", "/api/login", data.toString(), "application/json");
+        assertEquals(200, res.statusCode(), res.body());
+        String setCookie = res.headers().firstValue("set-cookie").orElseThrow();
+        assertTrue(setCookie.contains("HttpOnly") && setCookie.contains("SameSite=Strict"));
+        cookie = setCookie.split(";", 2)[0];
+        return App.JSON.readTree(res.body()).get("today").textValue();
+    }
+
+    @Test void dispatchReportsAndAccessThroughHttp() throws Exception {
+        try (var db = fixtureDatabase()) {
+            Db.initialize(db);
+            try (var add = db.prepareStatement("INSERT INTO people(name,username,password_hash,is_admin) VALUES('Admin','admin',?,1)")) {
+                add.setString(1, Auth.hash("integration-password"));
+                add.executeUpdate();
+            }
+        }
+        int port;
+        try (var socket = new ServerSocket(0)) { port = socket.getLocalPort(); }
+        base = "http://127.0.0.1:" + port;
+        var launch = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("surefire.test.class.path"), "fieldops.App");
+        configureDatabase(launch);
+        launch.environment().remove("FIELDOPS_PHOTO_STORAGE");
+        launch.environment().put("FIELDOPS_CONFIG_DIR", temp.resolve("config").toString());
+        launch.environment().put("FIELDOPS_STORAGE_OWNER_ID", "1");
+        launch.environment().put("FIELDOPS_R2_ACCOUNT_ID", "a".repeat(32));
+        launch.environment().put("FIELDOPS_PORT", String.valueOf(port));
+        launch.environment().put("FIELDOPS_SECURE_COOKIE", "0");
+        launch.environment().put("RUNTIME_DIRECTORY", temp.resolve("runtime").toString());
+        Path log = temp.resolve("server.log");
+        Process server = launch.redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            boolean ready = false;
+            for (int i = 0; i < 120 && server.isAlive(); i++) {
+                try { ready = request("GET", "/api/me", null, null).statusCode() == 401; }
+                catch (java.io.IOException e) { /* Connector is still starting. */ }
+                if (ready) break;
+                Thread.sleep(100);
+            }
+            assertTrue(ready, () -> "Server failed to start. See " + log);
+            String html = request("GET", "/", null, null).body();
+            assertTrue(html.contains("Sign in") && !html.contains("<script"));
+            api("GET", "/profiles", null, 401);
+            var anonymous = request("GET", R2Setup.PATH, null, null);
+            assertTrue(anonymous.body().contains("name='return_to' value='" + R2Setup.PATH + "'"));
+            assertFalse(anonymous.body().contains("name='secret'"));
+            var payrollLink = request("GET", "/entities/1/payroll", null, null);
+            assertTrue(payrollLink.body().contains("name='return_to' value='/entities/1/payroll'"));
+            assertTrue(request("GET", "/entities/1/rates", null, null).body().contains("name='return_to' value='/entities/1/rates'"));
+            assertTrue(request("GET", JobReportExport.SAMPLE, null, null).body().contains("name='return_to' value='" + JobReportExport.SAMPLE + "'"));
+            assertTrue(request("GET", PayrollChecks.SAMPLE_DOWNLOAD, null, null).body().contains(
+                "name='return_to' value='" + PayrollChecks.SAMPLE_DOWNLOAD + "'"));
+            String today = login("AdMiN");
+            assertTrue(request("GET", "/job-reports", null, null).body().contains("Include uploaded photos"));
+            verifyJobReportSample();
+            assertTrue(request("GET", "/payroll", null, null).body().contains("Weekly payroll"));
+            assertTrue(request("GET", "/payroll/check-settings", null, null).body().contains("href='" + PayrollChecks.SAMPLE_DOWNLOAD + "'"));
+            var download = client.send(HttpRequest.newBuilder(URI.create(base + PayrollChecks.SAMPLE_DOWNLOAD))
+                .header("Cookie", cookie).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, download.statusCode());
+            assertEquals("application/pdf", download.headers().firstValue("Content-Type").orElseThrow());
+            assertEquals("attachment; filename=\"Field-Routes-VOID-stock-aligned.pdf\"",
+                download.headers().firstValue("Content-Disposition").orElseThrow());
+            try (var pdf = getClass().getResourceAsStream("/web/Field-Routes-VOID-revised.pdf")) {
+                assertNotNull(pdf);
+                assertArrayEquals(pdf.readAllBytes(), download.body());
+            }
+            var storage = request("GET", R2Setup.PATH, null, null);
+            assertEquals(200, storage.statusCode());
+            assertTrue(storage.body().contains("Create bucket") && storage.body().contains("Verify and connect R2"));
+            var invalid = request("POST", R2Setup.PATH, "endpoint=bad&secret=example-test-value", "application/x-www-form-urlencoded");
+            assertEquals(422, invalid.statusCode());
+            assertFalse(invalid.body().contains("example-test-value"));
+            api("POST", "/roles", "{\"name\":\"Unused catalog role\"}", 201);
+            api("POST", "/roles", "{\"name\":\"unused catalog role\"}", 409);
+            assertEquals("Unused catalog role", api("GET", "/roles", null, 200).at("/0/name").asText());
+            assertTrue(request("GET", "/roles", null, null).body().contains("Unused catalog role"));
+            String profile = """
+                {"name":"Alex","username":"alex","role":"Installer","pay_basis":"daily","pay_rate":0,
+                "email":"alex@example.test","phone":"0123","address":"8 A&B St, Apt #2","password":"integration-password"}
+                """;
+            long alex = api("POST", "/profiles", profile, 201).get("id").longValue();
+            long blair = api("POST", "/profiles", profile.replace("alex","blair").replace("Alex","Blair"), 201).get("id").longValue();
+            long entity = api("POST", "/entities", "{\"name\":\"Example utility\"}", 201).get("id").longValue();
+            String payrollPath = "/entities/" + entity + "/payroll";
+            try (var local = fixtureDatabase()) {
+                EntityRateCards.importCatalog(local, (com.fasterxml.jackson.databind.node.ObjectNode)EntityRateCards.JSON.readTree("""
+                    {"listed":[{"id":800,"companyName":"Example utility"}],"entities":[{"id":800,"companyName":"Example utility",
+                    "billingModel":"BASE_PER_FOOT","boreRatePerFoot":"2.712345","roleRates":[]}],"itemNames":{},"roleNames":{}}
+                    """));
+            }
+            String entityPage = request("GET", "/entities/" + entity, null, null).body();
+            assertTrue(entityPage.contains(payrollPath) && entityPage.contains("wg_bore_rate_per_foot") && entityPage.contains("Labor Rates"));
+            String ratePath = "/entities/" + entity + "/rates";
+            assertTrue(entityPage.contains("href='" + ratePath + "'"));
+            assertTrue(request("GET",ratePath,null,null).body().contains("2.712345"));
+            assertEquals(404,request("GET","/entities/99999/rates",null,null).statusCode());
+            var payrollPage = request("GET", payrollPath, null, null);
+            assertEquals(200, payrollPage.statusCode());
+            assertTrue(payrollPage.body().contains("2.712345"));
+            var preview = request("POST", payrollPath,
+                "action=calculate&preview_index=0&revision=0&formula_label=Example&formula_basis=production&" +
+                "formula_footage_credit=full&formula_expression=wg_bore_rate_per_foot*feet_buried&sample_feet_buried=5",
+                "application/x-www-form-urlencoded");
+            assertEquals(200, preview.statusCode());
+            assertTrue(preview.body().contains("13.561725"));
+            verifyRateCardSave(ratePath, entity);
+            assertEquals(404, request("GET", "/entities/99999/payroll", null, null).statusCode());
+            String draft = "name=Draft+team&entity_id=" + entity + "&member=" + alex;
+            String type = "application/x-www-form-urlencoded";
+            var resultList = request("POST", "/teams/new", draft + "&picker=search&contractor_search=BLA", type);
+            assertEquals(200, resultList.statusCode());
+            assertTrue(resultList.body().contains("name='member' value='" + alex + "' checked"));
+            assertTrue(resultList.body().contains("name='member' value='" + blair + "'>"));
+            var noMatches = request("POST", "/teams/new", draft + "&picker=search&contractor_search=Absent", type);
+            assertTrue(noMatches.body().contains("name='member' value='" + alex + "' checked"));
+            assertFalse(noMatches.body().contains("name='member' value='" + blair + "'"));
+            assertTrue(api("GET", "/teams", null, 200).isEmpty());
+            long team = api("POST", "/teams", """
+                {"name":"West","member_ids":[%d],"entity_id":%d}
+                """.formatted(alex,entity), 201).get("id").longValue();
+            String route = """
+                {"team_id":%d,"date":"%s","addresses":[{"address":"8 A&B St, Apt #2","external_job_id":"0007-W"},"Second street"]}
+                """.formatted(team,today);
+            JsonNode assignedRoute = api("POST", "/routes", route, 201);
+            long job = assignedRoute.at("/jobs/0/id").longValue();
+            assertEquals("0007-W", assignedRoute.at("/jobs/0/external_job_id").asText());
+            api("POST", "/routes", route, 409);
+            api("PUT", "/profiles/" + alex, profile.replace("\"pay_rate\":0", "\"pay_rate\":null"), 200);
+            assertEquals(0, api("GET","/routes",null,200).at("/0/members/0/pay_rate").intValue());
+            assertTrue(request("GET","/people",null,null).body().contains("Alex"));
+            String mapsHref = "href='https://www.google.com/maps/dir/?api=1&amp;destination=8+A%26B+St%2C+Apt+%232'";
+            assertTrue(request("GET", "/people", null, null).body().contains(mapsHref));
+            String teamPath = "/routes/team/" + team + "?date=" + today;
+            String daily = request("GET", "/routes", null, null).body();
+            assertTrue(daily.contains("href='" + teamPath + "'"));
+            assertFalse(daily.contains(mapsHref));
+            assertFalse(daily.contains("Open report"));
+            var detail = request("GET", teamPath, null, null);
+            assertEquals(200, detail.statusCode());
+            assertTrue(detail.body().contains(mapsHref) && detail.body().contains("Crew · Alex"));
+            assertTrue(detail.body().contains("href='/jobs/" + job + "'"));
+            assertEquals(404, request("GET", "/routes/team/" + team + "?date=2000-01-01", null, null).statusCode());
+            assertEquals(teamPath, request("GET", "/routes?team=" + team + "&date=" + today, null, null)
+                .headers().firstValue("location").orElseThrow());
+            String editor = request("GET", "/people/" + alex, null, null).body();
+            assertTrue(editor.contains("Unused catalog role") && editor.contains("value='Installer'"));
+            login("alex");
+            assertEquals(403, request("GET", ratePath, null, null).statusCode());
+            assertEquals(403, request("POST", ratePath, "action=save&boreRatePerFoot=2", type).statusCode());
+            assertEquals(403, request("GET", JobReportExport.SAMPLE, null, null).statusCode());
+            assertEquals(403, request("GET", payrollPath, null, null).statusCode());
+            assertEquals(403, request("POST", payrollPath, "", type).statusCode());
+            for (String restricted : java.util.List.of("/payroll", "/payroll/export", "/payroll/export/workbook",
+                    "/payroll/export/details","/payroll/checks", "/payroll/checks/1", "/payroll/statement/1",
+                    "/payroll/check-settings", PayrollChecks.SAMPLE_DOWNLOAD)) {
+                assertEquals(403, request("GET", restricted, null, null).statusCode());
+            }
+            assertEquals(403, request("POST", "/payroll", "action=generate", type).statusCode());
+            assertEquals(403, request("POST", "/payroll/checks", "", type).statusCode());
+            assertEquals(403, request("GET", teamPath, null, null).statusCode());
+            assertEquals(403, request("GET", "/job-reports", null, null).statusCode());
+            assertEquals(403, request("POST", "/job-reports/export", "start="+today+"&end="+today+"&photos=1", type).statusCode());
+            assertEquals(403, request("GET", R2Setup.PATH, null, null).statusCode());
+            assertEquals(403, request("POST", R2Setup.PATH, "action=create&setup_token=unused", "application/x-www-form-urlencoded").statusCode());
+            String myRoute = request("GET", "/", null, null).body();
+            assertTrue(myRoute.contains("0007-W"));
+            assertEquals(403, request("GET", "/items", null, null).statusCode());
+            assertTrue(myRoute.contains(mapsHref) && myRoute.contains("href='/jobs/" + job + "'>Open report"));
+            assertTrue(request("GET", "/jobs/" + job, null, null).body().contains(mapsHref));
+            api("GET","/profiles",null,403);
+            api("GET", "/roles", null, 403);
+            api("POST", "/roles", "{\"name\":\"Example\"}", 403);
+            assertEquals(403, request("GET", "/roles", null, null).statusCode());
+            assertEquals(403,request("GET","/people",null,null).statusCode());
+            assertFalse(api("GET","/routes",null,200).get(0).has("members"));
+            String report = "{\"feet_buried\":20,\"bores\":[{\"type\":\"road\",\"feet\":5}],\"fiber_type\":\"Drop\",\"revision\":0}";
+            String payload = "--test-boundary\r\nContent-Disposition: form-data; name=\"report\"\r\n\r\n" + report
+                    + "\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"photos\"; filename=\"view.webp\"\r\n"
+                    + "Content-Type: image/webp\r\n\r\nRIFF0000WEBPsample\r\n--test-boundary--\r\n";
+            String endpoint = "/api/jobs/" + job + "/report";
+            var result = request("POST",endpoint,payload,"multipart/form-data; boundary=test-boundary");
+            assertEquals(200,result.statusCode(),result.body());
+            String photo = App.JSON.readTree(result.body()).at("/photos/0/url").textValue();
+            assertEquals(200,request("GET",photo,null,null).statusCode());
+            assertEquals(409,request("POST",endpoint,payload,"multipart/form-data; boundary=test-boundary").statusCode());
+            verifyJobReportDownloads(today, job, photo);
+            login("blair");
+            assertTrue(request("GET", "/", null, null).body().contains("No routes shown"));
+            assertTrue(api("GET","/routes",null,200).isEmpty());
+            assertEquals(404,request("GET",photo,null,null).statusCode());
+            assertEquals(404,request("POST",endpoint,payload,"multipart/form-data; boundary=test-boundary").statusCode());
+            verifyStopEdits(teamPath, assignedRoute, photo);
+            verifyJobIdEdit(assignedRoute.at("/jobs/1/id").asLong());
+            api("POST","/logout",null,200);
+            api("GET","/me",null,401);
+            verifyPasswordPermissions(alex, profile);
+        } finally {
+            server.destroy();
+            if (!server.waitFor(10, TimeUnit.SECONDS)) server.destroyForcibly();
+        }
+    }
+
+    private void verifyJobIdEdit(long job) throws Exception {
+        String path = "/jobs/" + job + "/address";
+        String update = """
+            {"address":"Second street","external_job_id":"001-X","revision":0}
+            """;
+        api("PUT", path, update, 403);
+        login("admin");
+        assertEquals("001-X", api("PUT", path, update, 200).path("external_job_id").asText());
+        api("PUT", path, update, 409);
+        String addressOnly = """
+            {"address":"Second street, Suite 2","revision":1}
+            """;
+        assertEquals("001-X", api("PUT", path, addressOnly, 200).path("external_job_id").asText());
+        String clear = """
+            {"address":"Second street, Suite 2","external_job_id":"","revision":2}
+            """;
+        assertEquals("", api("PUT", path, clear, 200).path("external_job_id").asText());
+    }
+
+    private void verifyPasswordPermissions(long alex, String profile) throws Exception {
+        String type = "application/x-www-form-urlencoded";
+        String passwordJson = "{\"current_password\":\"integration-password\",\"new_password\":\"updated-password\"}";
+        String passwordForm = "current_password=integration-password&new_password=updated-password&confirmation=updated-password";
+        try (var db = fixtureDatabase()) {
+            StoreSql.change(db, "UPDATE people SET must_change_password=1 WHERE id=?", alex);
+            StoreSql.change(db, "UPDATE people SET must_change_password=1 WHERE username='admin'");
+        }
+        var contractorLogin = request("POST", "/login", "username=alex&password=integration-password", type);
+        assertEquals("/", contractorLogin.headers().firstValue("location").orElseThrow());
+        cookie = contractorLogin.headers().firstValue("set-cookie").orElseThrow().split(";", 2)[0];
+        assertFalse(api("GET", "/me", null, 200).path("must_change_password").asBoolean());
+        var home = request("GET", "/", null, null);
+        assertEquals(200, home.statusCode());
+        assertFalse(home.body().contains("href='/change-password'"));
+        assertEquals(403, request("GET", "/change-password", null, null).statusCode());
+        assertEquals(403, request("POST", "/change-password", passwordForm, type).statusCode());
+        api("POST", "/change-password", passwordJson, 403);
+        api("PUT", "/profiles/" + alex, profile, 403);
+        String contractorCookie = cookie;
+
+        cookie = "";
+        var firstLogin = request("POST", "/login", "username=admin&password=integration-password", type);
+        assertEquals("/change-password", firstLogin.headers().firstValue("location").orElseThrow());
+        cookie = firstLogin.headers().firstValue("set-cookie").orElseThrow().split(";", 2)[0];
+        assertTrue(api("GET", "/me", null, 200).path("must_change_password").asBoolean());
+        api("GET", "/routes", null, 403);
+        assertEquals("/change-password", request("GET", "/routes", null, null).headers().firstValue("location").orElseThrow());
+        assertEquals(200, request("GET", "/change-password", null, null).statusCode());
+        var changed = request("POST", "/change-password", passwordForm, type);
+        assertEquals("/login?changed=1", changed.headers().firstValue("location").orElseThrow());
+        api("GET", "/me", null, 401);
+        var adminLogin = request("POST", "/login", "username=admin&password=updated-password", type);
+        assertEquals("/", adminLogin.headers().firstValue("location").orElseThrow());
+        cookie = adminLogin.headers().firstValue("set-cookie").orElseThrow().split(";", 2)[0];
+        assertTrue(request("GET", "/routes", null, null).body().contains("href='/change-password'"));
+        assertEquals(200, request("GET", "/change-password", null, null).statusCode());
+        api("PUT", "/profiles/" + alex, profile.replace("integration-password", "assigned-password"), 200);
+        api("POST", "/change-password", "{\"current_password\":\"incorrect\",\"new_password\":\"updated-again\"}", 422);
+        api("POST", "/change-password", "{\"current_password\":\"updated-password\",\"new_password\":\"updated-again\"}", 200);
+        api("GET", "/me", null, 401);
+        cookie = contractorCookie;
+        api("GET", "/me", null, 401);
+        api("POST", "/login", "{\"username\":\"alex\",\"password\":\"integration-password\"}", 401);
+        assertFalse(api("POST", "/login", "{\"username\":\"alex\",\"password\":\"assigned-password\"}", 200)
+                .path("must_change_password").asBoolean());
+    }
+
+    private void verifyRateCardSave(String path, long entityId) throws Exception {
+        String editor = request("GET", path, null, null).body();
+        var digest = java.util.regex.Pattern.compile("name='digest' value='([a-f0-9]{64})'").matcher(editor);
+        assertTrue(digest.find());
+        StringBuilder form = new StringBuilder("action=save&billingModel=BASE_PER_FOOT&digest=").append(digest.group(1));
+        for (var scalar : EntityRateFields.SCALARS)
+            form.append("&").append(scalar.name()).append("=").append(scalar.name().equals("boreRatePerFoot") ? "3.012345" : "");
+        for (String key : java.util.List.of("footageTiers", "items", "googleLaborItemRates", "roleRates"))
+            form.append("&").append(key).append(".count=0");
+        String type = "application/x-www-form-urlencoded";
+        var save = request("POST", path, form.toString(), type);
+        assertEquals(303, save.statusCode(), save.body());
+        assertTrue(request("GET", "/entities/" + entityId, null, null).body().contains("3.012345"));
+        assertEquals(409, request("POST", path, form.toString(), type).statusCode());
+    }
+
+    private void verifyJobReportSample() throws Exception {
+        assertTrue(request("GET", JobReportExport.PATH, null, null).body().contains("href='" + JobReportExport.SAMPLE + "'"));
+        var response = client.send(HttpRequest.newBuilder(URI.create(base + JobReportExport.SAMPLE))
+            .header("Cookie", cookie).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, response.statusCode());
+        assertEquals("application/zip", response.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals("attachment; filename=\"Field-Routes-Sample-Job-Report.zip\"", response.headers().firstValue("Content-Disposition").orElseThrow());
+        var sample = unzip(response.body());
+        assertEquals(2, sample.keySet().stream().filter(name -> name.startsWith("photos/") && name.endsWith(".jpg")).count());
+        var workbook = sample.entrySet().stream().filter(entry -> entry.getKey().endsWith(".xlsx")).findFirst().orElseThrow();
+        assertTrue(unzip(workbook.getValue()).containsKey("xl/workbook.xml"));
+    }
+
+    private void verifyJobReportDownloads(String day, long job, String photoUrl) throws Exception {
+        login("admin");
+        String type = "application/x-www-form-urlencoded";
+        assertEquals(422, request("POST", "/job-reports/export", "start=2024-02-01&end=2024-03-01", type).statusCode());
+        assertTrue(request("POST", "/job-reports/export", "start=2001-04-01&end=2001-04-30", type).body()
+            .contains("No submitted job reports"));
+        for (boolean photos : java.util.List.of(false, true)) {
+            var req = HttpRequest.newBuilder(URI.create(base + "/job-reports/export"))
+                .header("Cookie", cookie).header("Content-Type", type)
+                .POST(HttpRequest.BodyPublishers.ofString("start=" + day + "&end=" + day + (photos ? "&photos=1" : ""))).build();
+            var download = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, download.statusCode());
+            String basename = "field-routes-job-reports-" + day + "-to-" + day;
+            assertEquals("attachment; filename=\"" + basename + (photos ? ".zip\"" : ".xlsx\""),
+                download.headers().firstValue("Content-Disposition").orElseThrow());
+            assertEquals(download.body().length, download.headers().firstValueAsLong("Content-Length").orElseThrow());
+            var entries = unzip(download.body());
+            if (photos) {
+                String image = "photos/" + day + "/job-" + job + "/photo-" + photoUrl.substring(photoUrl.lastIndexOf('/') + 1) + ".webp";
+                assertEquals(java.util.Set.of(basename + ".xlsx", image), entries.keySet());
+                assertArrayEquals("RIFF0000WEBPsample".getBytes(java.nio.charset.StandardCharsets.UTF_8), entries.get(image));
+                entries = unzip(entries.get(basename + ".xlsx"));
+            }
+            assertTrue(entries.containsKey("xl/workbook.xml"));
+            String jobs = new String(entries.get("xl/worksheets/sheet1.xml"), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(jobs.contains("0007-W"));
+            assertFalse(jobs.contains("Second street"));
+            assertEquals(photos, jobs.contains("photos/" + day + "/job-" + job + "/"));
+        }
+    }
+
+    private static java.util.Map<String, byte[]> unzip(byte[] data) throws Exception {
+        var entries = new java.util.HashMap<String, byte[]>();
+        try (var zip = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(data))) {
+            for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry())
+                entries.put(entry.getName(), zip.readAllBytes());
+        }
+        return entries;
+    }
+
+    private void verifyStopEdits(String teamPath, JsonNode route, String photo) throws Exception {
+        String type = "application/x-www-form-urlencoded";
+        String routeField = "route_id=" + route.path("id").longValue();
+        String add = "action=add&" + routeField + "&route_revision=0&addresses=Third+St%0AFourth+Ave&stop_label=drop&urgent=1";
+        assertEquals(403, request("POST", teamPath, add, type).statusCode());
+        login("admin");
+        assertEquals(303, request("POST", teamPath, add, type).statusCode());
+        assertEquals(409, request("POST", teamPath, add, type).statusCode());
+        long removedJob = route.at("/jobs/0/id").longValue();
+        long retainedJob = route.at("/jobs/1/id").longValue();
+        String classify = "action=classify&" + routeField + "&route_revision=1&job_id=" + retainedJob + "&stop_label=survey";
+        assertEquals(303, request("POST", teamPath, classify, type).statusCode());
+        String filtered = request("GET", teamPath + "&filter=urgent", null, null).body();
+        assertTrue(filtered.contains("Third St") && !filtered.contains("Second street"));
+        String remove = "action=remove&" + routeField + "&route_revision=2&job_id=" + removedJob;
+        assertEquals(303, request("POST", teamPath, remove, type).statusCode());
+        assertTrue(request("GET", teamPath, null, null).body().contains("Removed stops (1)"));
+        assertEquals(200, request("GET", photo, null, null).statusCode());
+        login("alex");
+        var home = request("GET", "/", null, null);
+        assertTrue(home.body().contains("Third St") && home.body().contains("Fourth Ave"));
+        assertTrue(home.body().contains("urgent-tag") && home.body().contains(">Survey</span>"));
+        assertEquals(403, request("POST", teamPath, classify, type).statusCode());
+        assertFalse(home.body().contains("href='/jobs/" + removedJob + "'"));
+        assertEquals(404, request("GET", photo, null, null).statusCode());
+    }
+}

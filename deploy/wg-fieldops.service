@@ -1,0 +1,22 @@
+[Unit]
+Description=WG field operations and crew routes
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/wg-server
+Environment=FIELDOPS_DATA_DIR=%h/.local/share/wg-fieldops
+Environment=FIELDOPS_TZ=America/New_York
+Environment=FIELDOPS_SECURE_COOKIE=1
+EnvironmentFile=-%h/.config/wg-fieldops/server.env
+RuntimeDirectory=wg-fieldops
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/jvm/temurin-21-jdk-amd64/bin/java -Xmx512m -cp %h/.local/lib/wg-fieldops/current/field-routes.jar:%h/.local/lib/wg-fieldops/current/lib/* fieldops.App
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+LimitCORE=0
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

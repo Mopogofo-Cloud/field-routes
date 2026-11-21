@@ -1,0 +1,49 @@
+.check-controls { margin-bottom: 1.3rem; }
+.check-pages { display: grid; gap: 1.1rem; overflow-x: auto; }
+.check-sheet { position: relative; width: 8.5in; height: 11in; overflow: hidden; background: white; color: #111; box-shadow: inset 0 0 0 1px #b8c4bd; }
+.paper-content { position: absolute; inset: 0; font: 11pt/1.12 Arial, sans-serif; }
+.check-face { position: absolute; inset: 0 0 auto; height: 3.45in; }
+.check-face > * { position: absolute; margin: 0; overflow-wrap: anywhere; }
+
+/* Field positions measured from the VOID print on blank check stock. */
+.face-date { right: .835in; top: .82in; width: 1.35in; text-align: right; }
+.face-payee { left: 1.035in; top: 1.40in; width: 5.30in; font-weight: 500; line-height: 1.05; }
+.face-payee.compact { font-size: 7.25pt; word-break: break-all; }
+.face-amount { right: .785in; top: 1.285in; width: 1.29in; text-align: right; white-space: nowrap; font-size: 9.5pt; font-weight: 700; font-variant-numeric: tabular-nums; }
+.face-words { left: .69in; top: 1.745in; width: 6.7in; font-size: 9.5pt; }
+.face-words.compact { font-size: 8.4pt; }
+.face-mail { left: .70in; top: 2.00in; width: 4.1in; max-height: .65in; overflow: hidden; white-space: pre-line; font-size: 9pt; }
+.face-mail.compact { width: 6.18in; font-size: 6pt; line-height: 1.05; }
+.face-memo { left: .70in; top: 2.685in; width: 4.7in; font-size: 10pt; }
+
+.stock-guides { position: absolute; inset: 0; font: 7pt/1.1 Arial, sans-serif; text-transform: uppercase; color: #55645d; }
+.stock-guides > *, .stock-guides::before, .stock-guides::after { position: absolute; }
+.stock-guides::before, .stock-guides::after { content: ""; left: 0; right: 0; border-top: 1px dashed #9da59d; }
+.stock-guides::before { top: 3.45in; }
+.stock-guides::after { top: 6.95in; }
+.caption-payee { left: .22in; top: 1.39in; width: .68in; }
+.caption-memo { left: .22in; top: 2.69in; }
+.test-scale { position: absolute; right: .55in; bottom: .31in; font: 8pt/1.2 Arial, sans-serif; text-align: center; }
+.test-scale span { display: block; width: 1in; height: .07in; margin: 0 auto 3pt; border: 1px solid currentColor; border-top: 0; }
+
+.stub-first, .stub-second { position: absolute; left: .57in; right: .62in; }
+.stub-first { top: 4.22in; bottom: 4.05in; }
+.stub-second { top: 8.02in; bottom: .50in; }
+.check-stub { font-size: 9pt; }
+.stub-title { display: flex; justify-content: space-between; min-height: .29in; }
+.stub-title strong { font-size: 12pt; }
+.stub-row { display: grid; grid-template-columns: .83in minmax(0, 1fr); min-height: .27in; align-items: baseline; }
+.stub-date { grid-template-columns: .48in minmax(0, 1fr); }
+.stub-memo { grid-template-columns: .56in minmax(0, 1fr); }
+.stub-row span { overflow-wrap: anywhere; }
+.stub-stats { margin: 4pt 0; }
+.stub-days { display: flex; flex-wrap: wrap; border-top: .5pt solid #555; padding-top: 3pt; gap: 3pt 9pt; font-size: 8.5pt; }
+@page { size: letter portrait; margin: 0; }
+@media print {
+  html, body { background: white; margin: 0 !important; padding: 0 !important; }
+  body > header, .check-controls, .stock-guides { display: none !important; }
+  body > main { width: 8.5in; max-width: none; margin: 0 !important; padding: 0 !important; }
+  .check-pages { display: block; overflow: visible; margin: 0; padding: 0; }
+  .check-sheet { box-shadow: none; break-inside: avoid; }
+  .check-sheet + .check-sheet { break-before: page; }
+}

@@ -1,0 +1,9 @@
+/target/
+/data/
+*.sqlite*
+*.log
+.env
+.env.*
+*.env
+r2.properties
+app-password
