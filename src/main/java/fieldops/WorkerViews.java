@@ -22,7 +22,7 @@ final class WorkerViews {
 
     static void list(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user) throws Exception {
         ArrayNode routes = Store.routes(db, user, null);
-        ArrayNode dailies = Mainline.dailies(db, user, value(user, "today"), null);
+        ArrayNode assignments = Mainline.workerAssignments(db, user);
         ArrayNode projects = Mainline.supervisedProjects(db, user);
         StringBuilder cards = new StringBuilder();
         int count = 0, submitted = 0;
@@ -47,15 +47,39 @@ final class WorkerViews {
             cards.append("</section>");
         }
         String day = LocalDate.parse(value(user,"today")).format(DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US));
-        String progress = count == 0 && !dailies.isEmpty() ? "" : count == 0 ?
+        String progress = count == 0 && !assignments.isEmpty() ? "" : count == 0 ?
             "<section class='panel empty'><h2>No routes shown</h2><p class='muted'>You have no route assigned for today.</p></section>" :
             "<div class='worker-progress'><strong>" + submitted + " of " + count + " stops submitted</strong><progress max='" +
                 count + "' value='" + submitted + "' aria-label='Stops submitted'></progress></div>";
         page(res, user, "My route", "<div class='worker'><header class='worker-route-header'><p class='eyebrow'>" + h(day) +
             "</p><div class='worker-section-title'><h1>My route</h1>" + link("Refresh route", "/", "btn secondary") +
             "</div></header>" + (param(req,"saved").equals("1") ? notice("Report saved.") : "") +
-            supervisedProjects(projects) + progress + cards + (dailies.isEmpty() ? "" : "<section class='stack'><h2>Mainline dailies</h2>" +
-            MainlineViews.dailyCards(dailies) + "</section>") + "</div>");
+            supervisedProjects(projects) + progress + cards + mainlineAssignments(assignments) + "</div>");
+    }
+
+    private static String mainlineAssignments(ArrayNode assignments) {
+        if (assignments.isEmpty()) return "";
+        var out = new StringBuilder("<section class='stack'><h2>Mainline assignments</h2>");
+        for (var daily : assignments) {
+            var crew = new java.util.StringJoiner(", ");
+            for (var name : daily.path("crew_names")) crew.add(name.asText());
+            out.append("<article class='panel stack'><h3>").append(h(value(daily, "project_name"))).append("</h3><p>")
+                .append(h(value(daily, "date"))).append(" · ").append(h(crew.toString())).append("</p>");
+            if (!daily.path("documents").isEmpty() || daily.path("can_report").asBoolean()) {
+                out.append("<div class='actions'>");
+                if (daily.path("can_report").asBoolean())
+                    out.append(link("Open daily report", "/mainline/dailies/" + daily.path("id").asLong(), "btn"));
+                for (var doc : daily.path("documents")) {
+                    String kind = doc.asText();
+                    String label = Character.toUpperCase(kind.charAt(0)) + kind.substring(1) + " PDF";
+                    out.append(link(label, "/mainline/projects/" + daily.path("project_id").asLong() + "/documents/" + kind,
+                        "btn secondary"));
+                }
+                out.append("</div>");
+            }
+            out.append("</article>");
+        }
+        return out.append("</section>").toString();
     }
 
     private static String supervisedProjects(ArrayNode projects) {

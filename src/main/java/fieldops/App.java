@@ -77,7 +77,8 @@ public final class App extends HttpServlet {
         connector.setProperty("maxThreads", "50");
         connector.setMaxPostSize(PLAN_FORM_LIMIT);
         connector.setMaxParameterCount(6000);
-        connector.setProperty("maxPartCount", "1100");
+        // Large daily crews and expense lists use the same fields in multipart and URL-encoded reports.
+        connector.setProperty("maxPartCount", "6000");
         var proxy = new RemoteIpValve();
         proxy.setInternalProxies("127\\.0\\.0\\.1");
         proxy.setRemoteIpHeader("X-Forwarded-For");
@@ -88,6 +89,11 @@ public final class App extends HttpServlet {
         var servlet = Tomcat.addServlet(ctx, "routes", new App());
         servlet.setMultipartConfigElement(new MultipartConfigElement(uploads.toString(), 12L * MIB, REPORT_LIMIT, 0));
         ctx.addServletMappingDecoded("/", "routes");
+        // Mainline validates each image after parsing so an oversized photo can be
+        // reported on the same form with the supervisor's typed fields intact.
+        var dailies = Tomcat.addServlet(ctx, "mainline-dailies", new App());
+        dailies.setMultipartConfigElement(new MultipartConfigElement(uploads.toString(), REPORT_LIMIT, REPORT_LIMIT, 0));
+        ctx.addServletMappingDecoded("/mainline/dailies/*", "mainline-dailies");
         return server;
     }
 
@@ -110,6 +116,9 @@ public final class App extends HttpServlet {
                 long limit = path.matches("/(?:api/)?jobs/[0-9]+(?:/report)?(?:/.*)?") ? REPORT_LIMIT : MIB;
                 if (path.matches("/mainline/dailies/[0-9]+/media/(map|pictures|receipts)") ||
                         path.matches("/mainline/projects/[0-9]+/documents/(redline|fiber|locates)")) limit = REPORT_LIMIT;
+                if (path.matches("/mainline/dailies/[0-9]+") && req.getContentType() != null
+                    && req.getContentType().toLowerCase(java.util.Locale.ROOT).startsWith("multipart/form-data"))
+                    limit = REPORT_LIMIT;
                 if (path.equals(TeamRouteWizard.PATH)) limit = PLAN_FORM_LIMIT;
                 if (req.getContentLengthLong() > limit) throw new Problem(413, "Request is too large.");
             }

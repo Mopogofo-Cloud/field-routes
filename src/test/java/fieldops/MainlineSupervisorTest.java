@@ -101,14 +101,18 @@ class MainlineSupervisorTest {
         assertNull(member(Mainline.crewDaily(db,incoming,id(self)),2));
 
         Mainline.addMembers(db,incoming,current,App.JSON.createArrayNode().add(2));
-        assertEquals(2,Mainline.daily(db,lead,current).path("driver_ids").get(0).asLong());
+        assertEquals(404,assertThrows(Problem.class,() -> Mainline.daily(db,lead,current)).status);
+        assertEquals(current,Mainline.workerAssignments(db,lead).at("/0/id").asLong());
+        assertEquals(2,Mainline.daily(db,incoming,current).path("driver_ids").get(0).asLong());
         assertFalse(Mainline.canManageCrew(db,lead,current));
         change(db,"UPDATE people SET name='Renamed contractor' WHERE id=3");
         assertEquals(1,Mainline.supervisedProjects(db,incoming).size());
         projectForm.put("revision",2).putNull("supervisor_person_id").put("supervisor","");
         Mainline.saveProject(db,admin,project,projectForm);
         assertTrue(Mainline.supervisedProjects(db,incoming).isEmpty());
-        assertNotNull(member(Mainline.daily(db,incoming,current),3));
+        assertNotNull(member(Mainline.daily(db,admin,current),3));
+        assertEquals(404,assertThrows(Problem.class,() -> Mainline.daily(db,incoming,current)).status);
+        assertFalse(Mainline.workerAssignments(db,incoming).at("/0/can_report").asBoolean());
         assertNull(member(Mainline.daily(db,admin,planned),3));
     }
 }

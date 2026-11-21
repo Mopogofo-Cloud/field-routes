@@ -177,7 +177,8 @@ public final class PostgresImport {
                     if (key == null && table.equals("mainline_projects") && name.equals("supervisor_person_id")) {
                         key = 0;
                         sourceExpression = "NULL";
-                    } else if (key == null && table.equals("mainline_daily_members") && name.equals("supervisor_only")) {
+                    } else if (key == null && ((table.equals("mainline_daily_members") && Set.of("supervisor_only","removed").contains(name)) ||
+                                              (table.equals("mainline_dailies") && name.equals("crew_revision")))) {
                         key = 0;
                         sourceExpression = "0";
                     }

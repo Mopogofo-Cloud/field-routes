@@ -177,10 +177,142 @@ class CloudPhotoTest {
         assertTrue(objects.isEmpty());
     }
 
-    @Test void mainlineGalleriesRetainEarlierBatchesAndProtectPhotosByDailyAssignment() throws Exception {
-        change(db, "INSERT INTO mainline_projects(id,name,state) VALUES(10,'Build','In Progress')");
+    private void setupMainlineCrew() throws Exception {
+        change(db, "INSERT INTO people(id,name,username,password_hash) VALUES(2,'Crew','other','test')");
+        change(db, "INSERT INTO mainline_projects(id,name,state,supervisor_person_id) VALUES(10,'Build','In Progress',1)");
         change(db, "INSERT INTO mainline_dailies(id,project_id,date) VALUES(11,10,?)", Db.today());
-        change(db, "INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(11,1,'Worker')");
+        change(db, "INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(11,1,'Worker'),(11,2,'Crew')");
+    }
+
+    private ObjectNode mainlineDraft(long revision) {
+        var draft = App.JSON.createObjectNode().put("revision", revision).put("total_footage", 126.75)
+            .put("comments", "East span finished").put("priority", "HIGH");
+        draft.putArray("driver_ids").add(2);
+        draft.putArray("expenses").addObject().put("type", "Gas").put("cost", 18.50);
+        return draft;
+    }
+
+    @Test void mainlineInlineSaveStoresReportAndEachGalleryWithTargetedRemovals() throws Exception {
+        setupMainlineCrew();
+        Part file = new Upload(image);
+        MainlineMedia.add(db,worker,11,"pictures",0,List.of(file),null);
+        long keep = MainlineMedia.list(db,worker,11).at("/0/id").asLong();
+        MainlineMedia.add(db,worker,11,"map",0,List.of(file),cloud);
+        long remove = MainlineMedia.list(db,worker,11).at("/1/id").asLong();
+        var maps = image.clone();
+        var pictures = image.clone();
+        var receipts = image.clone();
+        maps[3] = 11;
+        pictures[3] = 22;
+        receipts[3] = 33;
+        Map<String,List<Part>> uploads = Map.of("receipts",List.of(new Upload(receipts)),
+            "map",List.of(new Upload(maps)), "pictures",List.of(new Upload(pictures)));
+        var draft = mainlineDraft(0);
+        assertEquals(404,assertThrows(Problem.class,() ->
+            MainlineMedia.saveReport(db,other,11,draft,uploads,Set.of(remove),cloud)).status);
+        assertEquals(422,assertThrows(Problem.class,() -> MainlineMedia.saveReport(db,worker,11,draft,
+            Map.of("map",List.of(file),"pictures",java.util.Collections.nCopies(10,file)),Set.of(remove),cloud)).status);
+        assertEquals(1,puts.get());
+
+        MainlineMedia.saveReport(db,worker,11,draft,uploads,Set.of(remove),cloud);
+        var saved = Mainline.daily(db,worker,11);
+        assertEquals(1,saved.path("revision").asInt());
+        assertEquals(126.75,saved.path("total_footage").asDouble());
+        assertEquals("East span finished",saved.path("comments").asText());
+        assertEquals("HIGH",saved.path("priority").asText());
+        assertEquals("Gas",saved.at("/expenses/0/type").asText());
+        assertEquals(18.50,saved.at("/expenses/0/cost").asDouble());
+        assertEquals(2,saved.at("/driver_ids/0").asLong());
+        var gallery = MainlineMedia.list(db,worker,11);
+        assertEquals(4,gallery.size());
+        var expected = new java.util.HashMap<>(Map.of("map",maps,"pictures",pictures,"receipts",receipts));
+        for (var photo : gallery) {
+            long id = photo.path("id").asLong();
+            assertNotEquals(remove,id);
+            byte[] contents = id==keep ? image : expected.remove(photo.path("category").asText());
+            assertArrayEquals(contents,MainlineMedia.photo(db,worker,11,id,()->cloud).content());
+        }
+        assertTrue(expected.isEmpty());
+        assertEquals(1,count("photo_cleanup"));
+        PhotoStorage.clean(db,cloud);
+        assertEquals(3,objects.size());
+    }
+
+    @Test void mainlineInlineUploadFailuresAndConcurrentEditsPreserveThePublishedReport() throws Exception {
+        setupMainlineCrew();
+        Part file = new Upload(image);
+        var before = Mainline.saveDaily(db,worker,11,App.JSON.createObjectNode().put("revision",0).put("comments","Original"));
+        MainlineMedia.add(db,worker,11,"pictures",0,List.of(file),cloud);
+        var originalGallery = MainlineMedia.list(db,worker,11);
+        long originalPhoto = originalGallery.at("/0/id").asLong();
+        var draft = mainlineDraft(1);
+        Map<String,List<Part>> uploads = Map.of("pictures",List.of(file),"receipts",List.of(file));
+        failPut = puts.get()+2;
+        assertEquals(503,assertThrows(Problem.class,() ->
+            MainlineMedia.saveReport(db,worker,11,draft,uploads,Set.of(originalPhoto),cloud)).status);
+        assertEquals(before,Mainline.daily(db,worker,11));
+        assertEquals(originalGallery,MainlineMedia.list(db,worker,11));
+        change(db,"UPDATE photo_cleanup SET eligible_at=0");
+        PhotoStorage.clean(db,cloud);
+        assertEquals(1,objects.size());
+        assertArrayEquals(image,MainlineMedia.photo(db,worker,11,originalPhoto,()->cloud).content());
+
+        onPut = () -> {
+            try (var second = openFixture()) {
+                change(second,"UPDATE mainline_dailies SET comments='Concurrent dispatch edit', revision=revision+1 WHERE id=11");
+            } catch (Exception ex) { throw new AssertionError(ex); }
+        };
+        assertEquals(409,assertThrows(Problem.class,() ->
+            MainlineMedia.saveReport(db,worker,11,draft,Map.of("map",List.of(file)),Set.of(originalPhoto),cloud)).status);
+        var newer = Mainline.daily(db,worker,11);
+        assertEquals("Concurrent dispatch edit",newer.path("comments").asText());
+        assertEquals(2,newer.path("revision").asInt());
+        assertEquals(before.path("total_footage"),newer.path("total_footage"));
+        assertEquals(before.path("driver_ids"),newer.path("driver_ids"));
+        assertEquals(before.path("expenses"),newer.path("expenses"));
+        assertEquals(originalGallery,MainlineMedia.list(db,worker,11));
+        int sent = puts.get();
+        assertEquals(409,assertThrows(Problem.class,() ->
+            MainlineMedia.saveReport(db,worker,11,draft,Map.of("map",List.of(file)),Set.of(),cloud)).status);
+        assertEquals(sent,puts.get());
+        change(db,"UPDATE photo_cleanup SET eligible_at=0");
+        PhotoStorage.clean(db,cloud);
+        assertEquals(1,objects.size());
+    }
+
+    @Test void mainlineInlineLocalFilesRollbackTogetherAndCanBeRetried() throws Exception {
+        setupMainlineCrew();
+        Part file = new Upload(image);
+        MainlineMedia.add(db,worker,11,"map",0,List.of(file),null);
+        var before = Mainline.daily(db,worker,11);
+        var gallery = MainlineMedia.list(db,worker,11);
+        long original = gallery.at("/0/id").asLong();
+        var draft = mainlineDraft(0);
+        List<Part> invalidBatch = List.of(file,new Upload(new byte[]{1,2,3}));
+        assertEquals(422,assertThrows(Problem.class,() -> MainlineMedia.saveReport(db,worker,11,draft,
+            Map.of("pictures",invalidBatch),Set.of(original),null)).status);
+        assertEquals(before,Mainline.daily(db,worker,11));
+        assertEquals(gallery,MainlineMedia.list(db,worker,11));
+        var admin = App.JSON.createObjectNode().put("id",99).put("is_admin",true);
+        change(db, "INSERT INTO mainline_dailies(id,project_id,date) VALUES(12,10,'2000-01-01')");
+        MainlineMedia.add(db,admin,12,"receipts",0,List.of(file),null);
+        long otherDailyPhoto = MainlineMedia.list(db,admin,12).at("/0/id").asLong();
+        assertEquals(409,assertThrows(Problem.class,() -> MainlineMedia.saveReport(db,worker,11,draft,
+            Map.of(),Set.of(original,otherDailyPhoto),null)).status);
+        assertEquals(before,Mainline.daily(db,worker,11));
+        assertEquals(gallery,MainlineMedia.list(db,worker,11));
+        assertArrayEquals(image,MainlineMedia.photo(db,admin,12,otherDailyPhoto,()->null).content());
+        MainlineMedia.saveReport(db,worker,11,draft,Map.of("pictures",List.of(file)),Set.of(original),null);
+        var updated = MainlineMedia.list(db,worker,11);
+        assertEquals(1,updated.size());
+        assertEquals("pictures",updated.at("/0/category").asText());
+        assertArrayEquals(image,MainlineMedia.photo(db,worker,11,updated.at("/0/id").asLong(),()->null).content());
+        assertEquals(1,Mainline.daily(db,worker,11).path("revision").asInt());
+        assertEquals(0,puts.get());
+    }
+
+    @Test void mainlineGalleriesRetainEarlierBatchesAndRequireProjectSupervisor() throws Exception {
+        setupMainlineCrew();
         Part picture = new Upload(image);
         assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.add(db,other,11,"map",0,List.of(picture),cloud)).status);
         assertEquals(0,puts.get());
@@ -192,6 +324,9 @@ class CloudPhotoTest {
         var all = MainlineMedia.list(db,worker,11);
         assertEquals(13,all.size());
         long mapId=all.get(12).get("id").asLong();
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.list(db,other,11)).status);
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.photo(db,other,11,mapId,()->cloud)).status);
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.remove(db,other,11,mapId)).status);
         assertEquals("map",all.get(12).get("category").asText());
         assertArrayEquals(image,MainlineMedia.photo(db,worker,11,mapId,()->cloud).content());
         assertEquals(422,assertThrows(Problem.class,()->MainlineMedia.add(db,worker,11,"receipts",0,
@@ -220,6 +355,8 @@ class CloudPhotoTest {
             MainlineDocuments.upload(db,admin,10,"fiber",0,new Upload(image),cloud)).status);
         MainlineDocuments.upload(db,admin,10,"redline",0,new Upload(first),cloud);
         assertEquals(1, MainlineDocuments.list(db,worker,10).at("/redline/revision").asInt());
+        assertEquals("redline",Mainline.workerAssignments(db,worker).at("/0/documents/0").asText());
+        assertEquals(404,assertThrows(Problem.class,()->Mainline.daily(db,worker,11)).status);
         assertEquals(404, assertThrows(Problem.class, () ->
             MainlineDocuments.download(db,other,10,"redline",()->cloud)).status);
         assertArrayEquals(first,MainlineDocuments.download(db,worker,10,"redline",()->cloud));

@@ -55,19 +55,29 @@ class MainlineTest {
         assertFalse(Mainline.canSeeProject(db,other,project));
         assertEquals(404,assertThrows(Problem.class,()->Mainline.daily(db,other,id)).status);
         assertEquals(404,assertThrows(Problem.class,()->Mainline.requireDaily(db,other,id)).status);
-        assertEquals(1,Mainline.dailies(db,worker,null,null).size());
+        assertTrue(Mainline.dailies(db,worker,null,null).isEmpty());
+        assertEquals(404,assertThrows(Problem.class,()->Mainline.requireDaily(db,worker,id)).status);
+        assertEquals(404,assertThrows(Problem.class,()->Mainline.daily(db,worker,id)).status);
+        var assignments = Mainline.workerAssignments(db,worker);
+        assertEquals(1,assignments.size());
+        assertEquals("Fiber expansion",assignments.get(0).path("project_name").asText());
+        assertFalse(assignments.get(0).path("can_report").asBoolean());
+        assertFalse(assignments.get(0).has("total_footage"));
+        assertFalse(assignments.get(0).has("driver_ids"));
+        assertTrue(Mainline.workerAssignments(db,other).isEmpty());
         assertEquals(0,Mainline.dailies(db,other,null,null).size());
         assertEquals(0,Vehicles.list(db,Db.today()).get(0).get("available").intValue());
         assertEquals(409,assertThrows(Problem.class,()->Mainline.createDaily(db,admin,create)).status);
         assertEquals(1,Mainline.dailies(db,admin,null,project).size());
         change(db,"UPDATE people SET name='New crew name' WHERE id=2");
         change(db,"UPDATE vehicles SET name='Truck 4' WHERE id=1");
-        assertEquals("Crew A",Mainline.daily(db,worker,id).at("/members/0/name").asText());
-        assertEquals("Truck 1",Mainline.daily(db,worker,id).at("/vehicles/0/name").asText());
+        assertEquals("Crew A",Mainline.workerAssignments(db,worker).at("/0/crew_names/0").asText());
+        assertEquals("Truck 1",Mainline.daily(db,admin,id).at("/vehicles/0/name").asText());
         var report=App.JSON.createObjectNode().put("revision",0).put("total_footage","125.34").put("priority","HIGH").put("comments","Fiber complete");
         report.putArray("expenses").addObject().put("type","Gas").put("cost","42.34");
-        assertEquals("Gas",Mainline.saveDaily(db,worker,id,report).at("/expenses/0/type").asText());
-        assertEquals(409,assertThrows(Problem.class,()->Mainline.saveDaily(db,worker,id,report)).status);
+        assertEquals(404,assertThrows(Problem.class,()->Mainline.saveDaily(db,worker,id,report)).status);
+        assertEquals("Gas",Mainline.saveDaily(db,admin,id,report).at("/expenses/0/type").asText());
+        assertEquals(409,assertThrows(Problem.class,()->Mainline.saveDaily(db,admin,id,report)).status);
         assertEquals(0,new BigDecimal("125.34").compareTo(Mainline.project(db,project).path("total_footage").decimalValue()));
         assertTrue(Mainline.project(db,project).at("/latest_daily/members/0/is_driver").asBoolean());
         assertEquals(0,one(db,"SELECT count(*) AS n FROM routes").get("n").asInt());
@@ -75,6 +85,7 @@ class MainlineTest {
         String past=LocalDate.parse(Db.today()).minusDays(1).toString();
         change(db,"UPDATE mainline_dailies SET date=? WHERE id=?",past,id);
         assertTrue(Mainline.dailies(db,worker,past,project).isEmpty());
+        assertTrue(Mainline.workerAssignments(db,worker).isEmpty());
         assertFalse(Mainline.canSeeProject(db,worker,project));
         assertEquals(404,assertThrows(Problem.class,()->Mainline.saveFootage(db,worker,id,1,BigDecimal.ONE)).status);
         assertEquals(1,Mainline.dailies(db,admin,past,project).size());
@@ -97,11 +108,14 @@ class MainlineTest {
         var selection = incoming.deepCopy().add(other.path("id")).add(worker.path("id"));
         var after = Mainline.addMembers(db, admin, dailyId, selection);
         assertEquals(after, Mainline.addMembers(db, admin, dailyId, selection));
-        assertEquals(after, Mainline.daily(db, other, dailyId));
+        assertEquals(404, assertThrows(Problem.class, () -> Mainline.daily(db, other, dailyId)).status);
+        assertEquals(dailyId, Mainline.workerAssignments(db,other).at("/0/id").asLong());
         assertEquals(2, after.path("members").size());
         assertEquals(before.at("/members/0"), after.at("/members/0"));
         assertFalse(after.at("/members/1/is_driver").asBoolean());
-        assertEquals(before.deepCopy().without("members"), after.deepCopy().without("members"));
+        assertEquals(before.path("crew_revision").asLong() + 1, after.path("crew_revision").asLong());
+        assertEquals(before.deepCopy().without(java.util.List.of("members","crew_revision")),
+            after.deepCopy().without(java.util.List.of("members","crew_revision")));
     }
 
     private static void verifyFullDailyCrew(Connection db, ObjectNode admin, long project, long pastDailyId) throws Exception {
@@ -120,9 +134,11 @@ class MainlineTest {
         assertEquals(163, daily.path("members").size());
         for (int index : new int[]{0, 81, 162}) {
             var assigned = person(members.get(index).asLong(), false);
-            var reports = Mainline.dailies(db, assigned, Db.today(), project);
-            assertEquals(1, reports.size());
-            assertEquals(daily.path("id"), reports.get(0).path("id"));
+            var assignments = Mainline.workerAssignments(db, assigned);
+            assertEquals(1, assignments.size());
+            assertEquals(daily.path("id").asLong(), assignments.get(0).path("id").asLong());
+            assertFalse(assignments.get(0).path("can_report").asBoolean());
+            assertEquals(163, assignments.get(0).path("crew_names").size());
         }
         assertEquals(1, Mainline.dailies(db, admin, Db.today(), project).size());
         var expanded = Mainline.addMembers(db, admin, pastDailyId, members);

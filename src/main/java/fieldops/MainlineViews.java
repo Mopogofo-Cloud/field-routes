@@ -92,7 +92,10 @@ final class MainlineViews {
                 .append(h(value(day, "date"))).append(" · Daily #").append(id).append(" · ")
                 .append(h(value(day, "total_footage"))).append(" ft</span>");
             var crew = new java.util.StringJoiner(", ");
-            for (var member : day.path("members")) crew.add(value(member, "name"));
+            for (var member : day.path("members")) {
+                if (!member.path("removed").asBoolean() && !member.path("former_supervisor").asBoolean())
+                    crew.add(value(member, "name"));
+            }
             if (crew.length() > 0) out.append("<span>").append(h(crew.toString())).append("</span>");
             out.append("</a>");
         }
@@ -119,7 +122,7 @@ final class MainlineViews {
                 .append(day.path("id").asLong()).append("</h3><p>").append(h(names.toString()))
                 .append("</p>").append(vehicleLine(day)).append("<div class='actions'>");
             if (date.equals(value(user, "today"))) body.append(link("Open report", dailyPath, "btn"));
-            body.append(link("Add team members", dailyPath + "/crew", "btn secondary")).append("</div></article>");
+            body.append(link("Manage crew", dailyPath + "/crew", "btn secondary")).append("</div></article>");
         }
         page(res, user, title, body.append("</section></div>").toString());
     }

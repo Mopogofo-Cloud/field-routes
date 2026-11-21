@@ -272,6 +272,47 @@ class HttpApiTest {
             .header("Content-Type", "multipart/form-data; boundary=test-file").POST(body).build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
+    private HttpResponse<String> postDailyReport(String path, String fields, java.util.Map<String,byte[]> files) throws Exception {
+        var body = new java.io.ByteArrayOutputStream();
+        var utf8 = java.nio.charset.StandardCharsets.UTF_8;
+        for (String field : fields.split("&")) {
+            String[] pair = field.split("=",2);
+            String value = java.net.URLDecoder.decode(pair[1],utf8);
+            body.write(("--report-test\r\nContent-Disposition: form-data; name=\"" + pair[0] + "\"\r\n\r\n"
+                + value + "\r\n").getBytes(utf8));
+        }
+        for (var entry : files.entrySet()) {
+            body.write(("--report-test\r\nContent-Disposition: form-data; name=\"" + entry.getKey()
+                + "\"; filename=\"fixture.png\"\r\nContent-Type: image/png\r\n\r\n").getBytes(utf8));
+            body.write(entry.getValue());
+            body.write("\r\n".getBytes(utf8));
+        }
+        body.write("--report-test--\r\n".getBytes(utf8));
+        return client.send(HttpRequest.newBuilder(URI.create(base + path)).header("Cookie",cookie)
+            .header("Content-Type","multipart/form-data; boundary=report-test")
+            .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static byte[] reportPng(int width) throws Exception {
+        var picture = new java.awt.image.BufferedImage(width,width,java.awt.image.BufferedImage.TYPE_INT_RGB);
+        var pixels = ((java.awt.image.DataBufferInt)picture.getRaster().getDataBuffer()).getData();
+        var random = new java.util.Random(2026);
+        for (int i = 0; i < pixels.length; i++) pixels[i] = random.nextInt();
+        var out = new java.io.ByteArrayOutputStream();
+        assertTrue(javax.imageio.ImageIO.write(picture,"png",out));
+        return out.toByteArray();
+    }
+
+    private static String galleryImagePath(String daily, String html, String gallery) {
+        String sectionId = "id='media-" + gallery.toLowerCase(java.util.Locale.ROOT) + "'";
+        int start = html.indexOf(sectionId);
+        assertTrue(start >= 0, () -> "Missing gallery " + gallery);
+        String section = html.substring(start, html.indexOf("</section>",start));
+        var match = java.util.regex.Pattern.compile("src='(" + daily + "/media/[0-9]+)'").matcher(section);
+        assertTrue(match.find(),() -> "Missing first image in " + gallery);
+        return match.group(1);
+    }
+
     private void verifyMainlineForms(String today, long worker, long secondMember, long additionalMember) throws Exception {
         String form = "application/x-www-form-urlencoded";
         String newProject = "/mainline/projects/new";
@@ -309,23 +350,37 @@ class HttpApiTest {
         byte[] pdf = ("%PDF-1.4\n%" + "x".repeat(1024 * 1024) + "\n%%EOF").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         assertEquals(303, uploadFile(document,"revision","document","application/pdf",pdf).statusCode());
 
+        String crewPath = daily + "/crew";
         login("alex");
         String home = request("GET","/",null,null).body();
-        assertTrue(home.contains("href='" + daily + "'") && !home.contains("href='" + earlier + "'"));
+        assertTrue(home.contains("Hill Road") && !home.contains("href='" + daily + "'"));
         assertFalse(home.contains("No routes shown"));
+        assertAccessDenied(request("GET", daily, null, null));
+        assertAccessDenied(request("POST", daily, "action=save&revision=0&comments=Denied", form));
+        assertAccessDenied(request("GET", crewPath, null, null));
+        assertAccessDenied(request("POST", crewPath, "action=add&member=" + additionalMember, form));
         assertEquals(404,request("GET",earlier,null,null).statusCode());
         assertEquals(404,request("POST",earlier,"action=save&revision=0&total_footage=35",form).statusCode());
         assertAccessDenied(request("GET",project,null,null));
+        login("admin");
+        String supervisor = java.net.URLEncoder.encode("Alex (@alex, #" + worker + ")", java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(project, redirectTarget(request("POST", project + "/edit", "revision=0&name=Hill+Road&location=North"
+            + "&state=In+Progress&estimated_footage=2000&supervisor=" + supervisor, form)));
+        login("alex");
         var report = request("GET",daily,null,null);
         assertEquals(200,report.statusCode());
         assertTrue(report.body().contains("href='" + document + "'"));
-        String crewPath = daily + "/crew";
-        assertFalse(report.body().contains("href='" + crewPath + "'"));
-        assertAccessDenied(request("GET", crewPath, null, null));
-        assertAccessDenied(request("POST", crewPath, "action=add&member=" + additionalMember, form));
+        assertTrue(report.body().contains("href='" + crewPath + "'"));
         String photoPage = daily + "/photos";
-        assertTrue(report.body().contains("href='" + photoPage + "' target='_blank' rel='noopener'"));
-        assertFalse(report.body().contains("type='file'"));
+        assertFalse(report.body().contains("href='" + photoPage + "'"));
+        var inline = java.util.regex.Pattern.compile("<form [^>]*enctype='multipart/form-data'[^>]*>(.*?)</form>",
+            java.util.regex.Pattern.DOTALL).matcher(report.body());
+        assertTrue(inline.find());
+        assertTrue(inline.group(1).contains("name='total_footage'") && inline.group(1).contains("name='comments'"));
+        for (String category : java.util.List.of("map","pictures","receipts"))
+            assertTrue(inline.group(1).contains("name='photos_" + category + "'"));
+        assertTrue(inline.group(1).contains("value='save'>Save daily report"));
+        assertFalse(inline.group(1).contains("<form "));
         assertEquals(404,request("GET",earlier + "/photos",null,null).statusCode());
         var downloaded = client.send(HttpRequest.newBuilder(URI.create(base + document)).header("Cookie",cookie).GET().build(),
             HttpResponse.BodyHandlers.ofByteArray());
@@ -333,47 +388,101 @@ class HttpApiTest {
         assertArrayEquals(pdf,downloaded.body());
         assertEquals(403,uploadFile(document,"revision","document","application/pdf",pdf).statusCode());
         String fields = "action=save&revision=0&total_footage=242.5&priority=HIGH&comments=North+crossing"
-            + "&expense_type=Gas&expense_cost=15.23&driver=" + worker;
-        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,fields,form)));
-        assertEquals(409,request("POST",daily,fields,form).statusCode());
+            + "&expense_type=Gas&expense_cost=15.23&driver=" + secondMember;
+        byte[] small = reportPng(2);
+        byte[] large = reportPng(640);
+        assertTrue(large.length > 1024 * 1024);
+        var invalid = postDailyReport(daily,fields,java.util.Map.of("photos_map",small,"photos_receipts",new byte[]{1,2,3}));
+        assertEquals(422,invalid.statusCode());
+        assertTrue(invalid.body().contains("North crossing") && invalid.body().contains("15.23") && invalid.body().contains("242.5"));
+        assertTrue(invalid.body().contains("choose them again"));
+        byte[] oversize = java.util.Arrays.copyOf(small,12 * 1024 * 1024 + 1);
+        var overLimit = postDailyReport(daily,fields,java.util.Map.of("photos_map",oversize));
+        assertTrue(overLimit.statusCode() == 413 || overLimit.statusCode() == 422);
+        assertTrue(overLimit.body().contains("12 MiB") && overLimit.body().contains("North crossing") && overLimit.body().contains("15.23"));
+        String unchanged = request("GET",daily,null,null).body();
+        assertFalse(unchanged.contains("North crossing") || unchanged.contains("15.23"));
+        assertTrue(unchanged.contains("Map (0)") && unchanged.contains("Receipts (0)"));
+        var newPhotos = java.util.Map.of("photos_map",large,"photos_receipts",small);
+        assertEquals(daily + "?saved=1",redirectTarget(postDailyReport(daily,fields,newPhotos)));
+        assertEquals(409,postDailyReport(daily,fields,newPhotos).statusCode());
         String updated = request("GET",daily,null,null).body();
         assertTrue(updated.contains("North crossing") && updated.contains("15.23"));
-
-        var picture = new java.io.ByteArrayOutputStream();
-        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(2,2,java.awt.image.BufferedImage.TYPE_INT_RGB),"png",picture);
-        var uploaded = uploadFile(daily + "/media/pictures","latest","photos","image/png",picture.toByteArray());
+        assertTrue(updated.contains("Map (1)") && updated.contains("Receipts (1)") && updated.contains("Pictures (0)"));
+        String mapPath = galleryImagePath(daily,updated,"Map");
+        String receiptPath = galleryImagePath(daily,updated,"Receipts");
+        var receivedMap = client.send(HttpRequest.newBuilder(URI.create(base + mapPath)).header("Cookie",cookie).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200,receivedMap.statusCode());
+        assertArrayEquals(large,receivedMap.body());
+        var uploaded = uploadFile(daily + "/media/pictures","latest","photos","image/png",small);
         assertEquals(303,uploaded.statusCode());
         assertEquals(photoPage + "#media-pictures",uploaded.headers().firstValue("Location").orElseThrow());
         assertTrue(request("GET",daily,null,null).body().contains("Pictures (1)"));
         String gallery = request("GET",photoPage,null,null).body();
         assertTrue(gallery.contains("type='file'") && gallery.contains("Remove image 1"));
-        assertTrue(gallery.contains("Pictures (1)") && gallery.contains("Map (0)") && gallery.contains("Receipts (0)"));
-        var photo = java.util.regex.Pattern.compile("src='(" + daily + "/media/[0-9]+)'").matcher(gallery);
-        assertTrue(photo.find());
-        String photoPath = photo.group(1);
+        assertTrue(gallery.contains("Pictures (1)") && gallery.contains("Map (1)") && gallery.contains("Receipts (1)"));
+        String photoPath = galleryImagePath(daily,gallery,"Pictures");
         assertEquals(200,request("GET",photoPath,null,null).statusCode());
         assertEquals(403,request("POST",project + "/export","scope=all",form).statusCode());
 
         login("casey");
-        assertTrue(request("GET","/",null,null).body().contains("href='" + daily + "'"));
-        assertTrue(request("GET",daily,null,null).body().contains("North crossing"));
-        String checked = fields.replace("revision=0", "revision=1").replace("North+crossing", "North+crossing+verified");
-        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,checked,form)));
-        login("alex");
-        assertTrue(request("GET",daily,null,null).body().contains("North crossing verified"));
+        String crewHome = request("GET", "/", null, null).body();
+        assertTrue(crewHome.contains("Hill Road") && !crewHome.contains("href='" + daily + "'"));
+        assertFalse(crewHome.contains("North crossing") || crewHome.contains("242.5"));
+        for (String privatePage : java.util.List.of(daily, crewPath, photoPage, photoPath))
+            assertAccessDenied(request("GET", privatePage, null, null));
+        assertAccessDenied(request("POST", daily, fields, form));
+        String removeReceipt = fields.replace("revision=0","revision=1") + "&remove_photo=" + receiptPath.substring(receiptPath.lastIndexOf('/') + 1);
+        assertAccessDenied(postDailyReport(daily,removeReceipt,java.util.Map.of("photos_pictures",small)));
+        assertAccessDenied(request("POST", daily + "/media/map", "", form));
+        assertAccessDenied(request("POST", photoPath + "/remove", "", form));
+        assertEquals(200, request("GET", document, null, null).statusCode());
 
+        login("alex");
+        assertEquals(daily + "?saved=1",redirectTarget(postDailyReport(daily,removeReceipt,java.util.Map.of())));
+        assertEquals(404,request("GET",receiptPath,null,null).statusCode());
+        String retained = request("GET",daily,null,null).body();
+        assertTrue(retained.contains("Map (1)") && retained.contains("Pictures (1)") && retained.contains("Receipts (0)"));
+        String crewPage = request("GET", crewPath, null, null).body();
+        var revision = java.util.regex.Pattern.compile("name='crew_revision' value='([0-9]+)'").matcher(crewPage);
+        assertTrue(revision.find(), "Crew form requires a roster revision");
+        String revisionField = "&crew_revision=" + revision.group(1);
+        String replacement = java.net.URLEncoder.encode("Devon (#" + additionalMember + ")", java.nio.charset.StandardCharsets.UTF_8);
+        String replace = "action=replace&departing_id=" + secondMember + "&replacement=" + replacement + revisionField;
+        assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, replace, form)));
+        assertEquals(409, request("POST", crewPath, "action=remove&departing_id=" + additionalMember + revisionField, form).statusCode());
+        // The report form was open before the swap. It can still save its in-progress field edits.
+        String checked = fields.replace("revision=0", "revision=2").replace("North+crossing", "North+crossing+verified");
+        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,checked,form)));
+        String after = request("GET",daily,null,null).body();
+        assertTrue(after.contains("North crossing verified") && after.contains("15.23") && after.contains("Pictures (1)"));
+        login("casey");
+        assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
+        assertAccessDenied(request("GET", document, null, null));
         login("devon");
-        assertEquals(404, request("GET", daily, null, null).statusCode());
+        assertTrue(request("GET", "/", null, null).body().contains("Hill Road"));
+        assertAccessDenied(request("GET", daily, null, null));
+        assertAccessDenied(request("POST", crewPath, "action=remove&departing_id=" + worker + revisionField, form));
+        login("alex");
+        revision.reset(request("GET", crewPath, null, null).body());
+        assertTrue(revision.find());
+        assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, "action=remove&departing_id="
+            + additionalMember + "&crew_revision=" + revision.group(1), form)));
+        login("devon");
+        assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
         login("admin");
         assertTrue(request("GET",daily,null,null).body().contains("href='" + crewPath + "'"));
         var more = request("POST", crewPath, "picker=search&contractor_search=Devon", form);
         assertTrue(more.body().contains("name='member' value='" + additionalMember + "'"));
-        assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, "action=add&member=" + additionalMember, form)));
-        for (String name : java.util.List.of("alex", "casey", "devon")) {
-            login(name);
-            assertTrue(request("GET","/",null,null).body().contains("href='" + daily + "'"));
-            assertTrue(request("GET",daily,null,null).body().contains("North crossing verified"));
-        }
+        assertEquals(409, request("POST", crewPath, "action=add&member=" + additionalMember, form).statusCode());
+        revision.reset(more.body());
+        assertTrue(revision.find());
+        assertEquals(daily + "?crew=1", redirectTarget(request("POST", crewPath, "action=add&member=" + additionalMember
+            + "&crew_revision=" + revision.group(1), form)));
+        login("devon");
+        assertTrue(request("GET","/",null,null).body().contains("Hill Road"));
+        assertAccessDenied(request("GET",daily,null,null));
 
         login("blair");
         assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
@@ -423,7 +532,7 @@ class HttpApiTest {
         login("alex");
         assertEquals(200, request("GET", unrelated, null, null).statusCode());
         assertEquals(200, request("GET", unrelatedDaily, null, null).statusCode());
-        assertEquals(200, request("GET", existing, null, null).statusCode());
+        assertAccessDenied(request("GET", existing, null, null));
         assertAccessDenied(request("POST", existing + "/crew", "action=add&member=" + casey, form));
         login("blair");
         assertAccessDenied(request("GET", project, null, null));
@@ -478,7 +587,7 @@ class HttpApiTest {
         assertEquals(solo + "?saved=1", redirectTarget(request("POST", solo, update, form)));
         assertEquals(solo + "?crew=1", redirectTarget(request("POST", solo + "/crew", "action=add&member=" + casey, form)));
         login("casey");
-        assertTrue(request("GET", solo, null, null).body().contains("Supervisor field notes"));
+        assertAccessDenied(request("GET", solo, null, null));
         assertAccessDenied(request("POST", solo + "/crew", "action=add&member=" + devon, form));
 
         login("admin");
@@ -496,7 +605,7 @@ class HttpApiTest {
         login("casey");
         assertAccessDenied(request("GET", project, null, null));
         assertAccessDenied(request("GET", existing, null, null));
-        assertEquals(200, request("GET", solo, null, null).statusCode()); // Explicitly on this crew before promotion.
+        assertAccessDenied(request("GET", solo, null, null)); // An explicit crew assignment grants schedule access only.
         assertAccessDenied(request("POST", solo + "/crew", "action=add&member=" + devon, form));
         login("admin");
     }

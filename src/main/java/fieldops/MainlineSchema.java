@@ -56,7 +56,7 @@ final class MainlineSchema {
         try (var stmt = db.createStatement()) {
             for (String definition : statements(StoreSql.postgres(db))) stmt.execute(definition);
         }
-        MainlineSupervisorSchema.initialize(db);
+        MainlineCrewSchema.initialize(db);
     }
 
     // Render the original Mainline migration. Supervisor accounts have their own incremental migration.

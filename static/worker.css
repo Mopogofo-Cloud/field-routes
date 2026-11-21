@@ -54,6 +54,12 @@
 .worker-photos figure { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: .4rem; overflow: hidden; }
 .worker-photos img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
 .worker-photos button { width: 100%; }
+.report-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr)); gap: .8rem; }
+.report-photos figure { min-width: 0; margin: 0; padding: .5rem; border: 1px solid var(--line); border-radius: .4rem; }
+.report-photos summary { cursor: pointer; font-weight: 650; color: var(--teal); }
+.report-photos img { display: block; width: 100%; height: 6rem; object-fit: cover; margin-block: .35rem; }
+.report-photos figure:has(details[open]) { grid-column: 1 / -1; }
+.report-photos details[open] img { height: auto; max-height: 75vh; object-fit: contain; }
 .worker-error { color: var(--danger); margin-block: .45rem; }
 .worker-entries > .worker-error { margin-inline: 1.2rem; }
 .worker-error button { display: block; text-decoration: underline; }

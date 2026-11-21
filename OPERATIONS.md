@@ -56,6 +56,8 @@ Mainline projects, daily assignments, footage, expenses and attachment reference
 
 For project supervisor access, apply [the supervisor migration](deploy/migrations/20261121-mainline-supervisors.sql) after the Mainline tables exist and before deploying the corresponding Java release. An admin grants access by selecting a contractor account in the project editor. Supervisor names saved as plain text can be linked to an account there.
 
+For daily crew removals and replacements, apply [the crew changes migration](deploy/migrations/20261121-mainline-crew-changes.sql) before deploying the updated Java service. Existing crew members start active. The crew has its own revision so roster changes can be saved while a report is open for editing.
+
 ### Connect private Cloudflare R2 storage
 
 1. Enable R2 in the Cloudflare account and sign in as the configured Field Routes owner. Open **Photo storage** in the account header.

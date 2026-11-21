@@ -25,6 +25,8 @@ class PostgresImportTest {
                 sql.execute("DROP INDEX mainline_projects_by_supervisor");
                 sql.execute("ALTER TABLE mainline_projects DROP COLUMN supervisor_person_id");
                 sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN supervisor_only");
+                sql.execute("ALTER TABLE mainline_daily_members DROP COLUMN removed");
+                sql.execute("ALTER TABLE mainline_dailies DROP COLUMN crew_revision");
                 sql.execute("INSERT INTO people(id,name,username,password_hash) VALUES(5,'Field lead','field.lead','x')");
                 sql.execute("INSERT INTO mainline_projects(id,name,supervisor,state) VALUES(1,'Project','Field lead','Not Started')");
                 sql.execute("INSERT INTO mainline_dailies(id,project_id,date) VALUES(1,1,'2026-01-05')");
@@ -53,9 +55,14 @@ class PostgresImportTest {
                     assertEquals("Field lead", result.getString(1));
                     assertNull(result.getObject(2));
                 }
-                try (var result = sql.executeQuery("SELECT supervisor_only FROM fieldroutes.mainline_daily_members")) {
+                try (var result = sql.executeQuery("SELECT supervisor_only,removed FROM fieldroutes.mainline_daily_members")) {
                     assertTrue(result.next());
                     assertEquals(0, result.getInt(1));
+                    assertEquals(0, result.getInt(2));
+                }
+                try (var result = sql.executeQuery("SELECT crew_revision FROM fieldroutes.mainline_dailies")) {
+                    assertTrue(result.next());
+                    assertEquals(0L, result.getLong(1));
                 }
                 try (var next = sql.executeQuery("SELECT nextval(pg_get_serial_sequence('fieldroutes.photos','id'))")) {
                     assertTrue(next.next());

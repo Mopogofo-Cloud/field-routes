@@ -11,6 +11,7 @@ import java.io.BufferedInputStream;
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -80,38 +81,91 @@ final class MainlineMedia {
     static void add(Connection db, ObjectNode user, long daily, String category, long latest,
                     List<Part> files, S3Photos store) throws Exception {
         if (!GALLERIES.contains(category)) throw new Problem(404, "Gallery not found.");
-        if (files.isEmpty() || files.size() > BATCH_SIZE) throw new Problem(422, "Choose 1 to 10 photos per upload.");
-        for (Part file : files) {
-            if (file.getSize() < 1 || file.getSize() > S3Photos.MAX_BYTES)
-                throw new Problem(422, "Each photo must be between 1 byte and 12 MiB.");
-        }
+        if (files.isEmpty()) throw new Problem(422, "Choose 1 to 10 photos per upload.");
+        var images = incoming(Map.of(category,files));
         checkBatch(db, user, daily, category, latest);
-        List<PhotoStorage.Upload> uploads = store == null ? List.of() : PhotoStorage.stage(db, store, files);
+        var uploads = stage(db,store,images);
         transaction(db, true, () -> {
             checkBatch(db, user, daily, category, latest);
-            if (store == null) {
-                for (Part file : files) {
-                    try (var input = new BufferedInputStream(file.getInputStream())) {
-                        input.mark(16);
-                        String mime = Store.mime(input.readNBytes(12));
-                        input.reset();
-                        try (var stmt = db.prepareStatement("INSERT INTO mainline_media(daily_id,category,mime,byte_count,content) VALUES(?,?,?,?,?)")) {
-                            bind(stmt, daily, category, mime, file.getSize());
-                            stmt.setBinaryStream(5, input, Math.toIntExact(file.getSize()));
-                            stmt.executeUpdate();
-                        }
-                    }
-                }
+            publish(db,daily,images,store,uploads);
+            return null;
+        });
+    }
+
+    private record Incoming(String category, Part file) {}
+
+    private static List<Incoming> incoming(Map<String,List<Part>> galleries) {
+        var images = new ArrayList<Incoming>();
+        for (var entry : galleries.entrySet()) {
+            if (!GALLERIES.contains(entry.getKey())) throw new Problem(422,"Choose a valid photo gallery.");
+            if (entry.getValue().size() > BATCH_SIZE - images.size())
+                throw new Problem(422,"Choose up to 10 new photos per save across all galleries.");
+            for (var file : entry.getValue()) {
+                if (file.getSize() < 1 || file.getSize() > S3Photos.MAX_BYTES)
+                    throw new Problem(422,"Each photo must be between 1 byte and 12 MiB.");
+                images.add(new Incoming(entry.getKey(), file));
+            }
+        }
+        return images;
+    }
+
+    private static List<PhotoStorage.Upload> stage(Connection db, S3Photos store, List<Incoming> images) throws Exception {
+        if (store == null || images.isEmpty()) return List.of();
+        return PhotoStorage.stage(db,store,images.stream().map(Incoming::file).toList());
+    }
+
+    // The caller holds the write transaction. Staged object keys become visible only if that transaction commits.
+    private static void publish(Connection db, long daily, List<Incoming> images, S3Photos store,
+                                List<PhotoStorage.Upload> uploads) throws Exception {
+        for (int i=0; i<images.size(); i++) {
+            var image = images.get(i);
+            if (store != null) {
+                var upload = uploads.get(i);
+                PhotoStorage.claimUpload(db,store,upload.key());
+                change(db, """
+                    INSERT INTO mainline_media(daily_id,category,mime,byte_count,destination,object_key,sha256)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, daily,image.category(),upload.mime(),image.file().getSize(),store.destination,upload.key(),upload.hash());
             } else {
-                for (var upload : uploads) {
-                    PhotoStorage.claimUpload(db, store, upload.key());
-                    change(db, """
-                        INSERT INTO mainline_media(daily_id,category,mime,byte_count,destination,object_key,sha256)
-                        VALUES(?,?,?,?,?,?,?)
-                        """, daily, category, upload.mime(), upload.part().getSize(), store.destination, upload.key(), upload.hash());
+                try (var input = new BufferedInputStream(image.file().getInputStream());
+                     var stmt = db.prepareStatement("INSERT INTO mainline_media(daily_id,category,mime,byte_count,content) VALUES(?,?,?,?,?)")) {
+                    input.mark(16);
+                    String mime = Store.mime(input.readNBytes(12));
+                    input.reset();
+                    bind(stmt,daily,image.category(),mime,image.file().getSize());
+                    stmt.setBinaryStream(5,input,Math.toIntExact(image.file().getSize()));
+                    stmt.executeUpdate();
                 }
             }
-            return null;
+        }
+    }
+
+    static ObjectNode saveReport(Connection db, ObjectNode user, long daily, ObjectNode draft,
+                                 Map<String,List<Part>> filesByCategory, Set<Long> removeIds, S3Photos store) throws Exception {
+        var images = incoming(filesByCategory);
+        if (images.isEmpty() && removeIds.isEmpty()) return Mainline.saveDaily(db,user,daily,draft);
+        if (store != null && !images.isEmpty()) {
+            // Check before sending bytes to R2, then check again inside updateDaily before publishing them.
+            transaction(db,false,()->{
+                Mainline.requireDaily(db,user,daily);
+                long expected = StoreInput.integer(draft.get("revision"),"revision");
+                if (one(db,"SELECT revision FROM mainline_dailies WHERE id=?",daily).get("revision").asLong() != expected)
+                    throw new Problem(409,"This daily changed. Reopen it before saving.");
+                return null;
+            });
+        }
+        var uploads = stage(db,store,images);
+        return transaction(db,true,()->{
+            var saved = Mainline.updateDaily(db,user,daily,draft);
+            if (!removeIds.isEmpty()) {
+                try (var stmt = db.prepareStatement("DELETE FROM mainline_media WHERE daily_id=? AND id=?")) {
+                    for (long id : removeIds) { bind(stmt,daily,id); stmt.addBatch(); }
+                    for (int deleted : stmt.executeBatch())
+                        if (deleted==0) throw new Problem(409,"A selected photo changed. Reopen the daily before saving.");
+                }
+            }
+            publish(db,daily,images,store,uploads);
+            return saved;
         });
     }
 
@@ -191,10 +245,9 @@ final class MainlineMedia {
         return true;
     }
 
-    static String renderSummary(Connection db, ObjectNode user, long daily) throws Exception {
-        String galleryPath = "/mainline/dailies/" + daily + "/photos";
-        return "<section class='panel stack'><h2>Daily photos</h2>" + galleries(list(db,user,daily), daily, false)
-            + "<a class='btn secondary' href='" + galleryPath + "' target='_blank' rel='noopener'>Manage photos (opens in a new tab)</a></section>";
+    static String reportFields(Connection db, ObjectNode user, long daily, Set<String> marked) throws Exception {
+        return "<section class='stack'><h2>Daily photos</h2><p class='helper'>Choose up to 10 new images per save across all three galleries. JPEG, PNG or WebP, up to 12 MiB each.</p>"
+            + galleries(list(db,user,daily), daily, true, marked) + "</section>";
     }
 
     private static void photoPage(HttpServletResponse res, Connection db, ObjectNode user, long daily) throws Exception {
@@ -204,13 +257,13 @@ final class MainlineMedia {
         String body = "<div class='stack'>" + link("← Daily report",path,"worker-back worker-text-button")
             + "<header><h1>Daily photos</h1><p>" + h(value(report,"project_name")) + " · " + h(value(report,"date")) + "</p></header>"
             + "<section class='panel stack'><p class='helper'>Upload up to 10 images at a time. You can add more in another batch. JPEG, PNG or WebP, up to 12 MiB each.</p>"
-            + galleries(list(db,user,daily),daily,true) + "</section></div>";
+            + galleries(list(db,user,daily),daily,false,Set.of()) + "</section></div>";
         page(res,user,title,body);
     }
 
-    private static String galleries(ArrayNode gallery, long daily, boolean edit) {
+    private static String galleries(ArrayNode gallery, long daily, boolean inline, Set<String> marked) {
         String root = "/mainline/dailies/" + daily + "/media/";
-        String heading = edit ? "h2" : "h3";
+        String heading = inline ? "h3" : "h2";
         var out = new StringBuilder();
         for (String category : GALLERIES) {
             int count = 0;
@@ -221,24 +274,31 @@ final class MainlineMedia {
                 long id = image.get("id").asLong();
                 latest = id;
                 count++;
-                if (!edit && count > 3) continue;
                 String url = root + id;
-                images.append("<div><a href='").append(url).append("'");
-                if (!edit) images.append(" target='_blank' rel='noopener'");
-                images.append("><img loading='lazy' width='96' height='72' alt='").append(label(category)).append(" image ").append(count)
-                    .append(edit ? "" : " (opens in a new tab)").append("' src='").append(url).append("'></a>");
-                if (edit) images.append("<form method='post' action='").append(url)
-                    .append("/remove'><button class='secondary'>Remove image ").append(count).append("</button></form>");
-                images.append("</div>");
+                String name = label(category) + " image " + count;
+                if (inline) {
+                    images.append("<figure><details><summary>").append(name)
+                        .append("<img loading='lazy' width='96' height='72' alt='' src='").append(url)
+                        .append("'></summary><a href='").append(url)
+                        .append("' target='_blank' rel='noopener'>Open original (new tab)</a></details>")
+                        .append("<label class='urgent-check'><input type='checkbox' name='remove_photo' value='")
+                        .append(id).append("'").append(marked.contains(Long.toString(id)) ? " checked" : "")
+                        .append(">Remove ").append(name).append(" on save</label></figure>");
+                } else {
+                    images.append("<div><a href='").append(url).append("'><img loading='lazy' width='96' height='72' alt='")
+                        .append(name).append("' src='").append(url).append("'></a><form method='post' action='").append(url)
+                        .append("/remove'><button class='secondary'>Remove image ").append(count).append("</button></form></div>");
+                }
             }
             out.append("<section class='stack' id='media-").append(category).append("'><").append(heading)
                 .append(">").append(label(category)).append(" (").append(count).append(")</").append(heading).append(">");
-            if (!images.isEmpty()) out.append("<div class='worker-photos'>").append(images).append("</div>");
-            if (edit) out.append("<form class='stack' method='post' action='")
-                .append(root).append(category).append("' enctype='multipart/form-data'>").append(hidden("latest",Long.toString(latest)))
-                .append("<label>Choose images<input type='file' aria-label='Choose images for ").append(label(category))
-                .append("' required multiple accept='").append(IMAGE_TYPES)
-                .append("' name='photos'></label><button>Upload</button></form>");
+            if (!images.isEmpty()) out.append(inline ? "<div class='report-photos'>" : "<div class='worker-photos'>")
+                .append(images).append("</div>");
+            if (!inline) out.append("<form class='stack' method='post' action='").append(root).append(category)
+                .append("' enctype='multipart/form-data'>").append(hidden("latest",Long.toString(latest)));
+            out.append("<label>Choose images for ").append(label(category)).append("<input type='file' multiple accept='")
+                .append(IMAGE_TYPES).append(inline ? "' name='photos_" + category : "' required name='photos").append("'></label>");
+            if (!inline) out.append("<button>Upload</button></form>");
             out.append("</section>");
         }
         return out.toString();

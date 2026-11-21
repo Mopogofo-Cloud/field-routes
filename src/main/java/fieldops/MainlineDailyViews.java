@@ -5,8 +5,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
 import java.sql.Connection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import static fieldops.Views.*;
 
@@ -64,7 +67,7 @@ final class MainlineDailyViews {
             problem = "Choose today or a future work date.";
         }
         var form = new StringBuilder("<form class='panel stack editor' method='post'>").append(alert(problem))
-            .append("<p class='helper'>Select everyone working on this project for the work date. The crew shares one daily report.</p>")
+            .append("<p class='helper'>Select the contractors working on this project for the work date.</p>")
             .append(field("Work date", "date", date, "type='date' required" + (admin ? "" : " min='" + h(today) + "'")));
         if (supervisorId != 0) form.append("<p><strong>Supervisor on this crew</strong> · ")
             .append(h(value(project, "supervisor"))).append(" (added automatically)</p>");
@@ -135,122 +138,197 @@ final class MainlineDailyViews {
         var selected = draft.putArray("member_ids");
         collectIds(req, "member", selected);
         String picker = param(req, "picker");
+        String departing = param(req, "departing_id");
+        String replacement = param(req, "replacement").strip();
         String problem = "";
+        var assigned = new HashSet<Long>();
+        for (var member : daily.path("members")) assigned.add(member.path("id").asLong());
+        var candidates = candidates(db, admin, assigned);
+        var replacements = replacementChoices(candidates);
         if (post && picker.isEmpty()) {
             try {
-                Mainline.addMembers(db, user, dailyId, selected);
+                String action = param(req, "action");
+                String version = param(req, "crew_revision");
+                if (action.isEmpty() || action.equals("add")) {
+                    Mainline.addMembers(db, user, dailyId, selected, version.isEmpty() ? null : id(version));
+                } else if (action.equals("remove") || action.equals("replace")) {
+                    if (version.isEmpty() || id(version) != daily.path("crew_revision").asLong())
+                        throw new Problem(409, "The crew changed. Review the current crew and choose the member again.");
+                    if (departing.isBlank()) throw new Problem(422, "Choose the current team member.");
+                    Long incoming = replacements.get(replacement);
+                    if (action.equals("replace") && incoming == null)
+                        throw new Problem(422, "Choose a replacement from the contractor suggestions.");
+                    if (action.equals("remove") && !replacement.isEmpty())
+                        throw new Problem(422, "Choose Replace member to use the selected replacement, or clear the replacement field.");
+                    Mainline.changeMember(db, user, dailyId, id(departing), incoming, id(version));
+                } else throw new Problem(422, "Choose a crew action.");
                 redirect(res, backPath + "?crew=1");
                 return;
             } catch (Problem err) {
                 if (err.status == 403 || err.status == 404) throw err;
                 res.setStatus(err.status);
                 problem = err.getMessage();
+                if (err.status == 409) {
+                    daily = Mainline.crewDaily(db, user, dailyId);
+                    assigned.clear();
+                    for (var member : daily.path("members")) assigned.add(member.path("id").asLong());
+                    candidates = candidates(db, admin, assigned);
+                    replacements = replacementChoices(candidates);
+                    selected.removeAll();
+                    departing = "";
+                    replacement = "";
+                }
             }
         }
 
-        String title = "Add team members";
-        var form = new StringBuilder("<section class='panel stack editor'>").append(alert(problem))
-            .append("<p>").append(h(value(daily, "project_name"))).append(" · ").append(h(value(daily, "date"))).append("</p>")
-            .append("<details><summary>Current crew (").append(daily.path("members").size()).append(")</summary><ul>");
-        var assigned = new HashSet<Long>();
+        String title = "Manage crew";
+        long supervisor = daily.path("supervisor_person_id").asLong();
+        var form = new StringBuilder("<div class='stack editor'>").append(alert(problem))
+            .append("<section class='panel stack'><h2>Current crew (").append(daily.path("members").size()).append(")</h2><p>")
+            .append(h(value(daily, "project_name"))).append(" · ").append(h(value(daily, "date"))).append("</p><ul>");
         for (var member : daily.path("members")) {
-            assigned.add(member.path("id").asLong());
-            form.append("<li>").append(h(value(member, "name"))).append("</li>");
+            form.append("<li>").append(h(value(member, "name")));
+            if (member.path("id").asLong() == supervisor) form.append(" · Project supervisor");
+            form.append("</li>");
         }
-        form.append("</ul></details>");
-        var candidates = candidates(db, admin, assigned);
+        form.append("</ul></section>");
+        form.append(changeMemberForm(daily, replacements, departing, replacement));
+        form.append("<section class='panel stack'><h2>Add team members</h2>");
         if (candidates.isEmpty()) form.append("<p>All contractors are on this daily crew.</p>");
-        else {
-            form.append("<form class='stack' method='post'>")
-                .append(AdminViews.contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
-                .append("<div class='actions'>").append(link("Cancel", backPath, "btn secondary"))
-                .append("<button name='action' value='add'>Add to daily crew</button></div></form>");
-        }
-        form.append("</section>");
+        else form.append("<form class='stack' method='post'>").append(hidden("crew_revision", value(daily, "crew_revision")))
+            .append(AdminViews.contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
+            .append("<div class='actions'><button name='action' value='add'>Add to daily crew</button></div></form>");
+        form.append("</section></div>");
         String heading = admin ? MainlineViews.heading(title, backLabel, backPath, "") :
             MainlineViews.workerHeading(title, backLabel, backPath, "");
         page(res, user, title, heading + form);
+    }
+
+    private static Map<String, Long> replacementChoices(ArrayNode candidates) {
+        var names = new HashSet<String>();
+        var duplicates = new HashSet<String>();
+        for (var person : candidates) {
+            String name = AdminViews.searchText(value(person, "name"));
+            if (!names.add(name)) duplicates.add(name);
+        }
+        var choices = new LinkedHashMap<String, Long>();
+        for (var person : candidates) {
+            String name = value(person, "name");
+            long personId = person.path("id").asLong();
+            String account = duplicates.contains(AdminViews.searchText(name)) ? "@" + value(person, "username") + ", " : "";
+            choices.put(name + " (" + account + "#" + personId + ")", personId);
+        }
+        return choices;
+    }
+
+    private static String changeMemberForm(ObjectNode daily, Map<String, Long> replacements,
+                                           String departing, String replacement) {
+        long supervisor = daily.path("supervisor_person_id").asLong();
+        var options = new StringBuilder();
+        for (var member : daily.path("members")) {
+            if (member.path("id").asLong() == supervisor) continue;
+            String key = value(member, "id");
+            options.append(option(key, value(member, "name") + " (#" + key + ")", departing));
+        }
+        if (options.isEmpty()) return "";
+        var form = new StringBuilder("<section class='panel stack'><h2>Remove or replace a member</h2>")
+            .append("<form class='stack' method='post'>").append(hidden("crew_revision", value(daily, "crew_revision")))
+            .append("<label>Current team member<select name='departing_id' required>")
+            .append(option("", "Select member", departing)).append(options).append("</select></label>");
+        if (!replacements.isEmpty()) {
+            form.append(field("Replacement contractor", "replacement", replacement,
+                "list='crew-replacements' maxlength='512' placeholder='Type a first or last name' autocomplete='off'"))
+                .append("<datalist id='crew-replacements'>");
+            for (String choice : replacements.keySet()) form.append("<option value='").append(h(choice)).append("'></option>");
+            form.append("</datalist>");
+        }
+        form.append("<div class='actions'>");
+        if (!replacements.isEmpty()) form.append("<button name='action' value='replace'>Replace member</button>");
+        return form.append("<button class='secondary' name='action' value='remove'>Remove member</button></div></form></section>").toString();
     }
 
     static void report(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user,
                        long dailyId, boolean post) throws Exception {
         var daily = Mainline.daily(db, user, dailyId);
         String path = "/mainline/dailies/" + dailyId;
-        ObjectNode draft = daily;
+        var report = new MainlineReportForm(req, daily, post);
+        var draft = report.draft;
         String problem = "";
         if (post) {
             String action = param(req, "action");
-            draft = App.JSON.createObjectNode().put("revision", param(req,"revision"))
-                .put("priority",param(req,"priority")).put("comments",param(req,"comments"))
-                .put("total_footage",param(req,"total_footage"));
-            collectIds(req, "driver", draft.putArray("driver_ids"));
-            var types = params(req, "expense_type");
-            var costs = params(req, "expense_cost");
-            if (costs.size() != types.size() || types.size() > 500) throw StoreInput.invalid("expenses");
-            var expenses = draft.putArray("expenses");
-            for (int i = 0; i < types.size(); i++) {
-                if (action.equals("remove-expense-" + i)) continue;
-                if (action.equals("save") && types.get(i).isBlank() && costs.get(i).isBlank()) continue;
-                expenses.addObject().put("type",types.get(i)).put("cost",costs.get(i));
-            }
-            if (action.equals("add-expense")) expenses.addObject();
-            else if (action.equals("save")) {
+            if (action.equals("save")) {
                 try {
-                    Mainline.saveDaily(db, user, dailyId, draft);
+                    var files = MainlineReportForm.uploads(req);
+                    MainlineMedia.saveReport(db, user, dailyId, report.changes(), files, report.removals(),
+                        files.isEmpty() ? null : PhotoStorage.active());
                     redirect(res, path + "?saved=1");
                     return;
                 } catch (Problem err) {
+                    if (err.status == 403 || err.status == 404) throw err;
                     res.setStatus(err.status);
                     problem = err.getMessage();
+                } catch (IOException err) {
+                    res.setStatus(503);
+                    problem = "The uploaded images could not be read.";
                 }
-            } else if (!action.matches("remove-expense-[0-9]+")) throw new Problem(422,"Choose a daily report action.");
+                if (MainlineReportForm.multipart(req))
+                    problem += " If you selected photos, choose them again before saving.";
+            } else if (!action.equals("add-expense") && !action.matches("remove-expense-[0-9]+"))
+                throw new Problem(422, "Choose a daily report action.");
         }
         long projectId = daily.path("project_id").asLong();
         boolean admin = user.path("is_admin").asBoolean();
-        boolean managesCrew = admin || Mainline.canManageCrew(db, user, dailyId);
         String projectName = value(daily,"project_name");
         String title = projectName + " · " + value(daily,"date");
         String projectPath = "/mainline/projects/" + projectId;
-        String crewLink = "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Add team members (opens in a new tab)</a>";
-        String heading;
-        if (admin) heading = MainlineViews.heading(title, "Project", projectPath, crewLink);
-        else if (managesCrew) heading = MainlineViews.workerHeading(title, "Project", projectPath, crewLink);
-        else heading = MainlineViews.workerHeading(title, "My route", "/", "");
+        String crewLink = "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Manage crew (opens in a new tab)</a>";
+        String heading = admin ? MainlineViews.heading(title, "Project", projectPath, crewLink) :
+            MainlineViews.workerHeading(title, "Project", projectPath, crewLink);
         var form = new StringBuilder("<div class='stack'>").append(heading);
         if (param(req,"saved").equals("1") && !post) form.append(notice("Daily report saved."));
-        if (managesCrew && param(req, "crew").equals("1") && !post) form.append(notice("Daily crew updated."));
-        form.append("<form method='post' class='panel stack editor'>").append(alert(problem))
+        if (param(req, "crew").equals("1") && !post) form.append(notice("Daily crew updated."));
+        form.append("<form method='post' enctype='multipart/form-data' class='panel stack editor'>").append(alert(problem))
             .append(hidden("revision", value(draft,"revision"))).append("<h2>Daily report</h2>")
-            .append(field("Total footage (ft)", "total_footage", value(draft,"total_footage"), "type='number' min='0' step='0.01'"))
-            .append("<details open><summary>Team members (").append(daily.path("members").size()).append(")</summary>")
-            .append("<fieldset><legend>Drivers</legend><div class='choices'>");
+            .append(field("Total footage (ft)", "total_footage", value(draft,"total_footage"), "type='number' min='0' step='0.01'"));
+        var activeDrivers = new StringBuilder();
+        var previousDrivers = new StringBuilder();
+        int activeCount = 0;
+        form.append(hidden("driver_baseline", "1"));
+        if (draft.has("initial_driver_ids")) {
+            for (var entry : draft.path("initial_driver_ids")) form.append(hidden("initial_driver", entry.asText()));
+        } else {
+            for (var member : daily.path("members"))
+                if (member.path("is_driver").asBoolean() && !member.path("removed").asBoolean())
+                    form.append(hidden("initial_driver", value(member,"id")));
+        }
         var drivers = idSet(draft.path("driver_ids"));
         for (var member : daily.path("members")) {
             String key = value(member,"id");
-            form.append("<label><input type='checkbox' name='driver' value='").append(h(key))
-                .append(drivers.contains(key) ? "' checked>" : "'>").append(h(value(member,"name")));
-            if (member.path("former_supervisor").asBoolean()) form.append(" · Former project supervisor");
-            form.append("</label>");
+            String name = h(value(member,"name"));
+            if (member.path("removed").asBoolean()) {
+                previousDrivers.append("<p>").append(name).append(" · Removed from crew</p>");
+                continue;
+            }
+            boolean former = member.path("former_supervisor").asBoolean();
+            if (!former) activeCount++;
+            var list = former ? previousDrivers : activeDrivers;
+            list.append("<label><input type='checkbox' name='driver' value='").append(h(key))
+                .append(drivers.contains(key) ? "' checked>" : "'>").append(name)
+                .append(former ? " · Former project supervisor" : "").append("</label>");
         }
-        form.append("</div></fieldset></details>").append(vehicleLine(daily));
-        form.append("<fieldset class='stack'><legend>Expenses</legend>");
-        int i = 0;
-        for (var expense : draft.path("expenses")) {
-            String type = value(expense,"type");
-            form.append("<div class='two'><label>Expense type<select name='expense_type'>")
-                .append(option("","Select type",type));
-            for (String choice : Mainline.EXPENSE_TYPES) form.append(option(choice,choice,type));
-            form.append("</select></label>").append(field("Cost ($)", "expense_cost", value(expense,"cost"),
-                "type='number' min='0' step='0.01'")).append("</div><button name='action' value='remove-expense-")
-                .append(i++).append("' class='text-button' formnovalidate>Remove expense</button>");
-        }
-        form.append("<div><button class='secondary' name='action' value='add-expense' formnovalidate>Add expense</button></div></fieldset>")
+        form.append("<details open><summary>Team members (").append(activeCount).append(")</summary>")
+            .append("<fieldset><legend>Drivers</legend><div class='choices'>").append(activeDrivers).append("</div></fieldset></details>");
+        if (!previousDrivers.isEmpty()) form.append("<fieldset><legend>Previously recorded drivers</legend>")
+            .append(previousDrivers).append("</fieldset>");
+        form.append(vehicleLine(daily));
+        form.append(report.expenses())
             .append("<label>Priority<select name='priority'>").append(option("","Select priority",value(draft,"priority")));
         for (var priority : Mainline.PRIORITIES) form.append(option(priority,priority,value(draft,"priority")));
         form.append("</select></label><label>Comments<textarea name='comments' maxlength='500' rows='4'>")
-            .append(h(value(draft,"comments"))).append("</textarea></label><div class='actions'><button name='action' value='save'>Save daily report</button></div></form>")
-            .append(MainlineMedia.renderSummary(db,user,dailyId))
-            .append(MainlineViews.documents(db,user,projectId,false)).append("</div>");
+            .append(h(value(draft,"comments"))).append("</textarea></label>")
+            .append(MainlineViews.documents(db, user, projectId, false))
+            .append(MainlineMedia.reportFields(db, user, dailyId, report.removedPhotos))
+            .append("<div class='actions'><button name='action' value='save'>Save daily report</button></div></form></div>");
         page(res, user, title, form.toString());
     }
 }
