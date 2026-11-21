@@ -22,6 +22,7 @@ final class WorkerViews {
 
     static void list(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user) throws Exception {
         ArrayNode routes = Store.routes(db, user, null);
+        ArrayNode dailies = Mainline.dailies(db, user, value(user, "today"), null);
         StringBuilder cards = new StringBuilder();
         int count = 0, submitted = 0;
         for (JsonNode route : routes) {
@@ -45,14 +46,15 @@ final class WorkerViews {
             cards.append("</section>");
         }
         String day = LocalDate.parse(value(user,"today")).format(DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US));
-        String progress = count == 0 ?
+        String progress = count == 0 && !dailies.isEmpty() ? "" : count == 0 ?
             "<section class='panel empty'><h2>No routes shown</h2><p class='muted'>You have no route assigned for today.</p></section>" :
             "<div class='worker-progress'><strong>" + submitted + " of " + count + " stops submitted</strong><progress max='" +
                 count + "' value='" + submitted + "' aria-label='Stops submitted'></progress></div>";
         page(res, user, "My route", "<div class='worker'><header class='worker-route-header'><p class='eyebrow'>" + h(day) +
             "</p><div class='worker-section-title'><h1>My route</h1>" + link("Refresh route", "/", "btn secondary") +
             "</div></header>" + (param(req,"saved").equals("1") ? notice("Report saved.") : "") +
-            progress + cards + "</div>");
+            progress + cards + (dailies.isEmpty() ? "" : "<section class='stack'><h2>Mainline dailies</h2>" +
+            MainlineViews.dailyCards(dailies) + "</section>") + "</div>");
     }
 
     private static String urgentLink(JsonNode jobs) {

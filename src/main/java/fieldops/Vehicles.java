@@ -29,11 +29,13 @@ final class Vehicles {
     private static final String BOOKED = """
         EXISTS(SELECT 1 FROM route_vehicles used JOIN routes booked ON booked.id=used.route_id
                WHERE used.vehicle_id=v.id AND booked.date=? AND booked.team_id<>?)
+        OR EXISTS(SELECT 1 FROM mainline_daily_vehicles used JOIN mainline_dailies booked ON booked.id=used.daily_id
+               WHERE used.vehicle_id=v.id AND booked.date=?)
         """;
 
     static ArrayNode list(Connection db, String date, long teamId) throws SQLException {
         return rows(db, "SELECT v.id,v.name,v.brand,v.plate,CASE WHEN " + BOOKED +
-            " THEN 0 ELSE 1 END AS available FROM vehicles v ORDER BY lower(v.name),v.id", StoreInput.date(date), teamId);
+            " THEN 0 ELSE 1 END AS available FROM vehicles v ORDER BY lower(v.name),v.id", StoreInput.date(date), teamId, date);
     }
 
     static ArrayNode list(Connection db, String date) throws SQLException {
@@ -62,7 +64,7 @@ final class Vehicles {
         long teamId = one(db, "SELECT team_id FROM routes WHERE id=?", routeId).get("team_id").asLong();
         for (long id : vehicleIds) {
             var vehicle = one(db, "SELECT v.name,v.brand,v.plate," + BOOKED + " AS booked FROM vehicles v WHERE id=?",
-                date, teamId, id);
+                date, teamId, date, id);
             if (vehicle == null) throw new Problem(422, "Select a vehicle in the vehicle list.");
             if (vehicle.path("booked").asBoolean()) throw new Problem(409,
                 vehicle.get("name").asText() + " is already assigned to another team on " + date + ". Choose an available vehicle.");

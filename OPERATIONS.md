@@ -52,6 +52,8 @@ Field Routes stores production data in Supabase PostgreSQL 17. Open Table Editor
 
 PostgreSQL holds accounts, routes, job reports, rate cards, payroll and the object keys linking reports to private Cloudflare R2 photos. Keep the `fieldroutes` schema private and outside the Data API's exposed schemas.
 
+Mainline projects, daily assignments, footage, expenses and attachment references live in the same schema. To upgrade an existing PostgreSQL installation to the first Mainline release, apply [the Mainline migration](deploy/migrations/20261121-mainline.sql) as a database administrator before restarting the Java service. Fresh installations create the tables during initialization.
+
 ### Connect private Cloudflare R2 storage
 
 1. Enable R2 in the Cloudflare account and sign in as the configured Field Routes owner. Open **Photo storage** in the account header.

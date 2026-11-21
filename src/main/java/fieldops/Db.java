@@ -236,6 +236,7 @@ final class Db {
             StoreSql.transaction(db, true, () -> {
                 for (var statement : SCHEMA) sql.execute(statement);
                 Vehicles.initialize(db);
+                MainlineSchema.initialize(db);
                 PayrollRuns.initialize(db);
                 EntityPayroll.initialize(db);
                 EntityRateCards.initialize(db);

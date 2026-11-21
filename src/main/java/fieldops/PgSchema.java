@@ -201,5 +201,6 @@ final class PgSchema {
                 );
                 """);
         }
+        MainlineSchema.initialize(db);
     }
 }

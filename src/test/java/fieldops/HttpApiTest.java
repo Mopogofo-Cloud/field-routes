@@ -131,6 +131,7 @@ class HttpApiTest {
                 """;
             long alex = api("POST", "/profiles", profile, 201).get("id").longValue();
             long blair = api("POST", "/profiles", profile.replace("alex","blair").replace("Alex","Blair"), 201).get("id").longValue();
+            verifyMainlineForms(today, alex);
             long entity = api("POST", "/entities", "{\"name\":\"Example utility\"}", 201).get("id").longValue();
             String payrollPath = "/entities/" + entity + "/payroll";
             try (var local = fixtureDatabase()) {
@@ -182,7 +183,9 @@ class HttpApiTest {
             String mapsHref = "href='https://www.google.com/maps/dir/?api=1&amp;destination=8+A%26B+St%2C+Apt+%232'";
             assertTrue(request("GET", "/people", null, null).body().contains(mapsHref));
             String teamPath = "/routes/team/" + team + "?date=" + today;
-            String daily = request("GET", "/routes", null, null).body();
+            String gateway = request("GET", "/routes", null, null).body();
+            assertTrue(gateway.contains("href='/mainline'") && gateway.contains("href='/routes/drops'"));
+            String daily = request("GET", "/routes/drops", null, null).body();
             assertTrue(daily.contains("href='" + teamPath + "'"));
             assertFalse(daily.contains(mapsHref));
             assertFalse(daily.contains("Open report"));
@@ -249,6 +252,104 @@ class HttpApiTest {
             server.destroy();
             if (!server.waitFor(10, TimeUnit.SECONDS)) server.destroyForcibly();
         }
+    }
+
+    private static String redirectTarget(HttpResponse<String> response) {
+        assertEquals(303, response.statusCode(), response.body());
+        return response.headers().firstValue("Location").orElseThrow();
+    }
+
+    private HttpResponse<byte[]> uploadFile(String path, String versionField, String field, String mime, byte[] bytes) throws Exception {
+        String prefix = "--test-file\r\nContent-Disposition: form-data; name=\"" + versionField + "\"\r\n\r\n0\r\n"
+            + "--test-file\r\nContent-Disposition: form-data; name=\"" + field + "\"; filename=\"fixture\"\r\n"
+            + "Content-Type: " + mime + "\r\n\r\n";
+        var body = HttpRequest.BodyPublishers.concat(HttpRequest.BodyPublishers.ofString(prefix),
+            HttpRequest.BodyPublishers.ofByteArray(bytes), HttpRequest.BodyPublishers.ofString("\r\n--test-file--\r\n"));
+        return client.send(HttpRequest.newBuilder(URI.create(base + path)).header("Cookie", cookie)
+            .header("Content-Type", "multipart/form-data; boundary=test-file").POST(body).build(), HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    private void verifyMainlineForms(String today, long worker) throws Exception {
+        String form = "application/x-www-form-urlencoded";
+        String project = redirectTarget(request("POST", "/mainline/projects/new",
+            "name=Hill+Road&location=North&state=In+Progress&estimated_footage=2000", form));
+        assertTrue(project.matches("/mainline/projects/[0-9]+"));
+        String assign = project + "/dailies/new";
+        assertTrue(request("GET", project, null, null).body().contains("href='" + assign + "'"));
+        var picker = request("POST", assign, "date=" + today + "&picker=search&contractor_search=Alex", form);
+        assertEquals(200, picker.statusCode());
+        assertTrue(picker.body().contains("name='member' value='" + worker + "'"));
+        String member = "&action=create&member=" + worker;
+        String earlier = redirectTarget(request("POST", assign, "date=2000-01-01" + member, form));
+        String daily = redirectTarget(request("POST", assign, "date=" + today + member, form));
+        assertTrue(daily.matches("/mainline/dailies/[0-9]+"));
+        assertNotEquals(earlier, daily);
+        String document = project + "/documents/fiber";
+        byte[] pdf = ("%PDF-1.4\n%" + "x".repeat(1024 * 1024) + "\n%%EOF").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        assertEquals(303, uploadFile(document,"revision","document","application/pdf",pdf).statusCode());
+
+        login("alex");
+        String home = request("GET","/",null,null).body();
+        assertTrue(home.contains("href='" + daily + "'") && !home.contains("href='" + earlier + "'"));
+        assertFalse(home.contains("No routes shown"));
+        assertEquals(404,request("GET",earlier,null,null).statusCode());
+        assertEquals(404,request("POST",earlier,"action=save&revision=0&total_footage=35",form).statusCode());
+        assertEquals(403,request("GET",project,null,null).statusCode());
+        var report = request("GET",daily,null,null);
+        assertEquals(200,report.statusCode());
+        assertTrue(report.body().contains("href='" + document + "'"));
+        String photoPage = daily + "/photos";
+        assertTrue(report.body().contains("href='" + photoPage + "' target='_blank' rel='noopener'"));
+        assertFalse(report.body().contains("type='file'"));
+        assertEquals(404,request("GET",earlier + "/photos",null,null).statusCode());
+        var downloaded = client.send(HttpRequest.newBuilder(URI.create(base + document)).header("Cookie",cookie).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200,downloaded.statusCode());
+        assertArrayEquals(pdf,downloaded.body());
+        assertEquals(403,uploadFile(document,"revision","document","application/pdf",pdf).statusCode());
+        String fields = "action=save&revision=0&total_footage=242.5&priority=HIGH&comments=North+crossing"
+            + "&expense_type=Gas&expense_cost=15.23&driver=" + worker;
+        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,fields,form)));
+        assertEquals(409,request("POST",daily,fields,form).statusCode());
+        String updated = request("GET",daily,null,null).body();
+        assertTrue(updated.contains("North crossing") && updated.contains("15.23"));
+
+        var picture = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(2,2,java.awt.image.BufferedImage.TYPE_INT_RGB),"png",picture);
+        var uploaded = uploadFile(daily + "/media/pictures","latest","photos","image/png",picture.toByteArray());
+        assertEquals(303,uploaded.statusCode());
+        assertEquals(photoPage + "#media-pictures",uploaded.headers().firstValue("Location").orElseThrow());
+        assertTrue(request("GET",daily,null,null).body().contains("Pictures (1)"));
+        String gallery = request("GET",photoPage,null,null).body();
+        assertTrue(gallery.contains("type='file'") && gallery.contains("Remove image 1"));
+        assertTrue(gallery.contains("Pictures (1)") && gallery.contains("Map (0)") && gallery.contains("Receipts (0)"));
+        var photo = java.util.regex.Pattern.compile("src='(" + daily + "/media/[0-9]+)'").matcher(gallery);
+        assertTrue(photo.find());
+        String photoPath = photo.group(1);
+        assertEquals(200,request("GET",photoPath,null,null).statusCode());
+        assertEquals(403,request("POST",project + "/export","scope=all",form).statusCode());
+
+        login("blair");
+        assertFalse(request("GET","/",null,null).body().contains("Hill Road"));
+        for (String hidden : java.util.List.of(document,daily,photoPage,photoPath))
+            assertEquals(404,request("GET",hidden,null,null).statusCode(),hidden);
+        assertEquals(404,request("POST",daily,fields,form).statusCode());
+        assertEquals(404,request("POST",daily + "/media/map","",form).statusCode());
+        assertEquals(404,request("POST",photoPath + "/remove","",form).statusCode());
+
+        login("admin");
+        String dayId = daily.substring(daily.lastIndexOf('/') + 1);
+        var workbook = client.send(HttpRequest.newBuilder(URI.create(base + project + "/export")).header("Cookie",cookie)
+            .header("Content-Type",form).POST(HttpRequest.BodyPublishers.ofString("scope=selected&images=1&daily=" + dayId)).build(),
+            HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200,workbook.statusCode());
+        var contents = unzip(workbook.body());
+        assertTrue(contents.containsKey("xl/workbook.xml"));
+        assertTrue(contents.keySet().stream().anyMatch(path -> path.startsWith("xl/media/")));
+        String dailies = new String(contents.get("xl/worksheets/sheet2.xml"),java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(dailies.contains("North crossing") && dailies.contains("242.5"));
+        assertFalse(dailies.contains("2000-01-01"));
+        assertEquals(photoPage + "#media-pictures", redirectTarget(request("POST",photoPath + "/remove","",form)));
     }
 
     private void verifyJobIdEdit(long job) throws Exception {

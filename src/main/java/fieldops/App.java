@@ -108,6 +108,8 @@ public final class App extends HttpServlet {
             if (!method.equals("GET") && !method.equals("HEAD")) {
                 checkOrigin(req);
                 long limit = path.matches("/(?:api/)?jobs/[0-9]+(?:/report)?(?:/.*)?") ? REPORT_LIMIT : MIB;
+                if (path.matches("/mainline/dailies/[0-9]+/media/(map|pictures|receipts)") ||
+                        path.matches("/mainline/projects/[0-9]+/documents/(redline|fiber|locates)")) limit = REPORT_LIMIT;
                 if (path.equals(TeamRouteWizard.PATH)) limit = PLAN_FORM_LIMIT;
                 if (req.getContentLengthLong() > limit) throw new Problem(413, "Request is too large.");
             }
@@ -291,6 +293,10 @@ public final class App extends HttpServlet {
     }
 
     private static void sendPhoto(HttpServletResponse res, Connection db, ObjectNode person, long id) throws Exception {
+        sendPhoto(res, () -> Store.photo(db, person, id));
+    }
+
+    static void sendPhoto(HttpServletResponse res, StoreSql.Work<Store.Photo, Exception> reader) throws Exception {
         // The verified image stays in memory until the servlet has sent it to the client.
         boolean acquired;
         try { acquired = PHOTO_RESPONSES.tryAcquire(5, java.util.concurrent.TimeUnit.SECONDS); }
@@ -300,7 +306,7 @@ public final class App extends HttpServlet {
             throw new Problem(503, "Photo downloads are busy. Please try again.");
         }
         try {
-            Store.Photo photo = Store.photo(db, person, id);
+            Store.Photo photo = reader.run();
             res.setContentType(photo.mime());
             res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
             res.setContentLength(photo.content().length);

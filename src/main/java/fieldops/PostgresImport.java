@@ -93,7 +93,11 @@ public final class PostgresImport {
             }
             var targetNames = strings(target, "SELECT table_name FROM information_schema.tables WHERE table_schema='fieldroutes' AND table_type='BASE TABLE'");
             var required = new TreeSet<>(targetNames);
-            required.removeAll(OPTIONAL);
+            var optionalTables = new TreeSet<>(OPTIONAL);
+            // Pre-Mainline SQLite backups contain none of the project tables.
+            if (java.util.Collections.disjoint(sourceNames, MainlineSchema.TABLES))
+                optionalTables.addAll(MainlineSchema.TABLES);
+            required.removeAll(optionalTables);
             check(targetNames.containsAll(sourceNames) && sourceNames.containsAll(required),
                 "The source and destination table sets differ. Check the schema version and upgrade a backup of the source first.");
             if (copy) {
@@ -101,7 +105,7 @@ public final class PostgresImport {
                 sql.execute("LOCK TABLE " + String.join(",", targetNames.stream().map(PostgresImport::qualified).toList()) + " IN ACCESS EXCLUSIVE MODE");
                 for (String table : targetNames) requireEmpty(target, table);
             }
-            for (String optional : OPTIONAL) {
+            for (String optional : optionalTables) {
                 if (targetNames.contains(optional) && !sourceNames.contains(optional)) requireEmpty(target, optional);
             }
             long total = 0;
@@ -206,9 +210,10 @@ public final class PostgresImport {
                 result.next();
                 last = Math.max(0, result.getLong(1));
             }
-            if (table.equals("photos")) {
-                // A removed photo's ID must never be assigned to a later upload.
-                try (var stmt = source.createStatement(); var seq = stmt.executeQuery("SELECT seq FROM sqlite_sequence WHERE name='photos'")) {
+            // Keep the high-water mark for every SQLite AUTOINCREMENT table, including removed media IDs.
+            try (var stmt = source.prepareStatement("SELECT seq FROM sqlite_sequence WHERE name=?")) {
+                stmt.setString(1, table);
+                try (var seq = stmt.executeQuery()) {
                     if (seq.next()) last = Math.max(last, seq.getLong(1));
                 }
             }

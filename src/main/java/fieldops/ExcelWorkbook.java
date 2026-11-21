@@ -19,7 +19,10 @@ final class ExcelWorkbook {
 
     @FunctionalInterface interface Rows { void write(Object... cells) throws IOException; }
     @FunctionalInterface interface Body { void write(Rows rows) throws IOException; }
-    record Sheet(String name, Body body) {}
+    @FunctionalInterface interface Drawing { void write(ZipOutputStream zip, int sheetId) throws IOException; }
+    record Sheet(String name, Body body, Drawing drawing) {
+        Sheet(String name, Body body) { this(name, body, null); }
+    }
 
     private ExcelWorkbook() {}
 
@@ -39,6 +42,7 @@ final class ExcelWorkbook {
                 """);
             StringBuilder book = new StringBuilder("<workbook xmlns='" + MAIN + "' xmlns:r='" + REL + "'><sheets>");
             StringBuilder links = new StringBuilder("<Relationships xmlns='" + RELS + "'>");
+            boolean pictureTypes = false;
             for (int i = 0; i < sheets.length; i++) {
                 int id = i + 1;
                 String file = "worksheets/sheet" + id + ".xml";
@@ -48,7 +52,20 @@ final class ExcelWorkbook {
                     .append("' r:id='sheet").append(id).append("'/>");
                 links.append("<Relationship Id='sheet").append(id).append("' Type='").append(REL)
                     .append("/worksheet' Target='").append(file).append("'/>");
-                sheet(zip, "xl/" + file, sheets[i].body());
+                Drawing drawing = sheets[i].drawing();
+                sheet(zip, "xl/" + file, sheets[i].body(), drawing != null);
+                if (drawing != null) {
+                    if (!pictureTypes) {
+                        types.append("<Default Extension='jpg' ContentType='image/jpeg'/><Default Extension='png' ContentType='image/png'/>")
+                            .append("<Default Extension='webp' ContentType='image/webp'/>");
+                        pictureTypes = true;
+                    }
+                    types.append("<Override PartName='/xl/drawings/drawing").append(id)
+                         .append(".xml' ContentType='application/vnd.openxmlformats-officedocument.drawing+xml'/>");
+                    part(zip, "xl/worksheets/_rels/sheet" + id + ".xml.rels", "<Relationships xmlns='" + RELS +
+                         "'><Relationship Id='pictures' Type='" + REL + "/drawing' Target='../drawings/drawing" + id + ".xml'/></Relationships>");
+                    drawing.write(zip, id);
+                }
             }
             part(zip, "[Content_Types].xml", types.append("</Types>").toString());
             part(zip, "_rels/.rels", "<Relationships xmlns='" + RELS + "'><Relationship Id='book' Type='" + REL +
@@ -74,22 +91,25 @@ final class ExcelWorkbook {
         zip.closeEntry();
     }
 
-    private static void sheet(ZipOutputStream zip, String file, Body body) throws IOException {
+    private static void sheet(ZipOutputStream zip, String file, Body body, boolean pictures) throws IOException {
         zip.putNextEntry(new ZipEntry(file));
         Writer out = new BufferedWriter(new OutputStreamWriter(zip, StandardCharsets.UTF_8));
         out.write("<worksheet xmlns='" + MAIN + "'><sheetViews><sheetView workbookViewId='0'>" +
             "<pane ySplit='1' topLeftCell='A2' activePane='bottomLeft' state='frozen'/></sheetView></sheetViews>");
-        var writer = new SheetRows(out);
+        var writer = new SheetRows(out, pictures);
         body.write(writer);
-        out.write("</sheetData><autoFilter ref='A1:" + column(writer.columns) + writer.count + "'/></worksheet>");
+        out.write("</sheetData><autoFilter ref='A1:" + column(writer.columns) + writer.count + "'/>");
+        if (pictures) out.write("<drawing xmlns:r='" + REL + "' r:id='pictures'/>");
+        out.write("</worksheet>");
         out.flush();
         zip.closeEntry();
     }
 
     private static final class SheetRows implements Rows {
         private final Writer out;
+        private final boolean pictures;
         int count, columns, moneyIndex = -1;
-        SheetRows(Writer out) { this.out = out; }
+        SheetRows(Writer out, boolean pictures) { this.out = out; this.pictures = pictures; }
 
         public void write(Object... cells) throws IOException {
             if (count == 0) {
@@ -99,6 +119,7 @@ final class ExcelWorkbook {
                     String heading = cells[i].toString();
                     if (heading.equals("Gross pay") || heading.equals("Line gross")) moneyIndex = i;
                     int width = switch (heading) {
+                        case "Image" -> 38;
                         case "Quantities and rates", "Review reason", "Expression", "Address", "Assigned crew", "Comments",
                              "Outcome reason", "Note", "Photo folder" -> 48;
                         case "Contractor", "Entity", "Crew", "Formula", "Team", "Contracting entity", "Author",
@@ -111,7 +132,7 @@ final class ExcelWorkbook {
                 out.write("</cols><sheetData>");
             }
             if (++count > 1_048_576) throw new IOException("Excel's worksheet row limit was exceeded. Select a shorter export period.");
-            out.write("<row r='" + count + "'>");
+            out.write("<row r='" + count + "'" + (pictures && count > 1 ? " ht='100' customHeight='1'" : "") + ">");
             for (int i = 0; i < cells.length; i++) {
                 Object value = cells[i];
                 if (value instanceof JsonNode n) {

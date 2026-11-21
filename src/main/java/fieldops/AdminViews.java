@@ -35,7 +35,15 @@ final class AdminViews {
 
     static void handle(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user,
                        String path, boolean post) throws Exception {
-        String[] pieces = path.substring(1).split("/");
+        if (path.equals("/routes") && !post && param(req, "date").isEmpty() && param(req, "team").isEmpty() &&
+                param(req, "saved").isEmpty()) {
+            page(res, user, "Routes", nav(Section.ROUTES) +
+                "<div class='section-head'><h1>Routes</h1></div><div class='route-sections'>" +
+                "<a class='panel route-section' href='/routes/drops'><h2>Drops</h2><span>Daily routes by team and address</span></a>" +
+                "<a class='panel route-section' href='/mainline'><h2>Mainline</h2><span>Projects and daily work reports</span></a></div>");
+            return;
+        }
+        String[] pieces = (path.equals("/routes/drops") ? "routes" : path.substring(1)).split("/");
         Section section = Section.valueOf(pieces[0].toUpperCase(Locale.ROOT));
         String date = param(req, "date");
         if (date.isEmpty()) date = value(user, "today");
@@ -81,7 +89,7 @@ final class AdminViews {
                 actions = "<div class='actions'>" + link(section.create, createLink, "btn secondary") +
                     link("Create team and route", TeamRouteWizard.PATH + "?date=" + url(date), "btn") + "</div>";
             page(res, user, section.title, nav(section) + "<div class='section-head'><div>" +
-                "<div class='eyebrow'>Admin workspace</div><h1>" + section.title + "</h1></div>" +
+                "<div class='eyebrow'>" + (section == Section.ROUTES ? link("Routes", "/routes", "text-button") + " / Drops" : "Admin workspace") + "</div><h1>" + section.title + "</h1></div>" +
                 actions + "</div><div class='stack'>" + feedback + body + "</div>");
             return;
         }
@@ -178,7 +186,7 @@ final class AdminViews {
         for (JsonNode route : Store.dailyTeamSummaries(db, user, date)) {
             byTeam.computeIfAbsent(route.path("team_id").asLong(), key -> new ArrayList<>()).add(route);
         }
-        StringBuilder out = new StringBuilder("<form method='get' action='/routes' class='row'>");
+        StringBuilder out = new StringBuilder("<form method='get' action='/routes/drops' class='row'>");
         out.append(field("Route date", "date", date, "type='date' required"))
             .append("<button class='secondary'>View date</button></form>");
         if (byTeam.isEmpty()) out.append("<section class='panel empty'><h2>No routes assigned</h2>")

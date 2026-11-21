@@ -69,6 +69,8 @@ final class Views {
         if (path.equals("/") && !post) {
             if (admin) redirect(res, "/routes");
             else WorkerViews.list(req, res, db, person);
+        } else if (path.equals("/mainline") || path.startsWith("/mainline/")) {
+            MainlineViews.handle(req, res, db, person, path, post);
         } else if (path.matches("/jobs/[0-9]+")) {
             WorkerViews.job(req, res, db, person, id(path.substring(6)));
         } else if (path.equals(JobReportExport.PATH) || path.equals(JobReportExport.DOWNLOAD) || path.equals(JobReportExport.SAMPLE)) {
@@ -79,7 +81,7 @@ final class Views {
             if (path.startsWith("/payroll/check")) PayrollChecks.handle(req, res, db, person, path, post, nav);
             else WeeklyPayrollViews.handle(req, res, db, person, path, post, nav);
         } else if (path.matches("/(routes|people|roles|teams|entities|items|vehicles)(/(new|[0-9]+))?") ||
-                path.matches("/entities/[0-9]+/(?:payroll|rates)") || path.matches("/routes/team/[0-9]+") || path.equals(TeamRouteWizard.PATH)) {
+                path.matches("/entities/[0-9]+/(?:payroll|rates)") || path.matches("/routes/team/[0-9]+") || path.equals("/routes/drops") || path.equals(TeamRouteWizard.PATH)) {
             if (!admin) throw new Problem(403, "Administrator access required.");
             AdminViews.handle(req, res, db, person, path, post);
         } else {
@@ -96,6 +98,8 @@ final class Views {
         if (JobReportExport.PATH.equals(target) || JobReportExport.DOWNLOAD.equals(target)) return JobReportExport.PATH;
         if ("/payroll".equals(target) || "/payroll/check-settings".equals(target) || PayrollChecks.SAMPLE_DOWNLOAD.equals(target)) return target;
         if (target != null && target.matches("/entities(?:/[0-9]+(?:/(?:payroll|rates))?)?")) return target;
+        if (target != null && (target.matches("/mainline(?:/projects(?:/new|/[0-9]+(?:/edit|/dailies/new)?)?|/dailies/[0-9]+(?:/photos)?)?") ||
+            target.equals("/routes/drops"))) return target;
         return LoginSheet.PATH.equals(target) || R2Setup.PATH.equals(target) ? target : "";
     }
 

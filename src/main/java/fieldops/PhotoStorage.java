@@ -10,6 +10,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.function.Function;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -56,11 +57,16 @@ final class PhotoStorage {
     // Persist a cleanup reservation before any PUT. A crash, stale job edit, timeout, or partial group
     // upload leaves a retryable cleanup record, without exposing uncommitted photos to workers.
     static List<Upload> stage(Connection db, S3Photos store, List<Part> parts) throws Exception {
+        return stage(db, store, parts, Store::mime);
+    }
+
+    static List<Upload> stage(Connection db, S3Photos store, List<Part> parts,
+                              Function<byte[],String> identifyMime) throws Exception {
         List<Upload> uploads = new ArrayList<>();
         for (Part part : parts) {
             try (var input = new BufferedInputStream(part.getInputStream())) {
                 input.mark(16);
-                String mime = Store.mime(input.readNBytes(12));
+                String mime = identifyMime.apply(input.readNBytes(12));
                 input.reset();
                 var digest = S3Photos.digest();
                 try (var checked = new DigestInputStream(input, digest)) {
@@ -89,17 +95,20 @@ final class PhotoStorage {
     }
 
     static void publish(Connection db, long jobId, S3Photos store, List<Upload> uploads) throws SQLException {
-        String now = dbTime(db);
         for (Upload u : uploads) {
-            if (change(db, """
-                DELETE FROM photo_cleanup WHERE destination=? AND object_key=? AND committable=1 AND eligible_at>%s
-                """.formatted(now), store.destination, u.key) != 1) throw S3Photos.unavailable();
+            claimUpload(db, store, u.key);
             // The parent row provides job authorization and a stable photo ID for both backends.
             long id = insertId(db, "INSERT INTO photos(job_id,mime,content) VALUES(?,?,?)", jobId, u.mime, new byte[0]);
             change(db, """
                 INSERT INTO photo_objects(photo_id,destination,object_key,byte_count,sha256) VALUES(?,?,?,?,?)
                 """, id, store.destination, u.key, u.part.getSize(), u.hash);
         }
+    }
+
+    static void claimUpload(Connection db, S3Photos store, String key) throws SQLException {
+        if (change(db, """
+            DELETE FROM photo_cleanup WHERE destination=? AND object_key=? AND committable=1 AND eligible_at>%s
+            """.formatted(dbTime(db)), store.destination, key) != 1) throw S3Photos.unavailable();
     }
 
     static void clean(Connection db, S3Photos store) throws SQLException {
@@ -110,6 +119,10 @@ final class PhotoStorage {
                     SELECT c.object_key FROM photo_cleanup c WHERE c.destination=? AND c.eligible_at<=%s
                       AND NOT EXISTS(SELECT 1 FROM photo_objects p
                           WHERE p.destination=c.destination AND p.object_key=c.object_key)
+                      AND NOT EXISTS(SELECT 1 FROM mainline_media m
+                          WHERE m.destination=c.destination AND m.object_key=c.object_key)
+                      AND NOT EXISTS(SELECT 1 FROM mainline_project_documents d
+                          WHERE d.destination=c.destination AND d.object_key=c.object_key)
                     ORDER BY c.eligible_at LIMIT 1
                     """.formatted(now), store.destination);
                 if (row == null) return null;

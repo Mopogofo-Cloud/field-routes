@@ -177,6 +177,65 @@ class CloudPhotoTest {
         assertTrue(objects.isEmpty());
     }
 
+    @Test void mainlineGalleriesRetainEarlierBatchesAndProtectPhotosByDailyAssignment() throws Exception {
+        change(db, "INSERT INTO mainline_projects(id,name,state) VALUES(10,'Build','In Progress')");
+        change(db, "INSERT INTO mainline_dailies(id,project_id,date) VALUES(11,10,?)", Db.today());
+        change(db, "INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(11,1,'Worker')");
+        Part picture = new Upload(image);
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.add(db,other,11,"map",0,List.of(picture),cloud)).status);
+        assertEquals(0,puts.get());
+        MainlineMedia.add(db,worker,11,"pictures",0,java.util.Collections.nCopies(10,picture),null);
+        long latest = MainlineMedia.list(db,worker,11).get(9).get("id").asLong();
+        MainlineMedia.add(db,worker,11,"pictures",latest,List.of(picture,picture),null);
+        assertEquals(409,assertThrows(Problem.class,()->MainlineMedia.add(db,worker,11,"pictures",latest,List.of(picture),null)).status);
+        MainlineMedia.add(db,worker,11,"map",0,List.of(picture),cloud);
+        var all = MainlineMedia.list(db,worker,11);
+        assertEquals(13,all.size());
+        long mapId=all.get(12).get("id").asLong();
+        assertEquals("map",all.get(12).get("category").asText());
+        assertArrayEquals(image,MainlineMedia.photo(db,worker,11,mapId,()->cloud).content());
+        assertEquals(422,assertThrows(Problem.class,()->MainlineMedia.add(db,worker,11,"receipts",0,
+            java.util.Collections.nCopies(11,picture),cloud)).status);
+        change(db, "UPDATE mainline_dailies SET date='2000-01-01' WHERE id=11");
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.photo(db,worker,11,mapId,()->cloud)).status);
+        assertEquals(404,assertThrows(Problem.class,()->MainlineMedia.remove(db,worker,11,mapId)).status);
+        var admin = App.JSON.createObjectNode().put("id",99).put("is_admin",true);
+        assertEquals("map",MainlineMedia.remove(db,admin,11,mapId));
+        assertEquals(12,MainlineMedia.list(db,admin,11).size());
+        assertEquals(1,count("photo_cleanup"));
+        PhotoStorage.clean(db,cloud);
+        assertTrue(objects.isEmpty());
+    }
+
+    @Test void mainlineProjectDocumentsHonorCrewAccessAndCleanUpReplacedFiles() throws Exception {
+        change(db, "INSERT INTO mainline_projects(id,name,state) VALUES(10,'Build','In Progress')");
+        change(db, "INSERT INTO mainline_dailies(id,project_id,date) VALUES(11,10,?)", Db.today());
+        change(db, "INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(11,1,'Worker')");
+        var admin = App.JSON.createObjectNode().put("is_admin",true);
+        byte[] first = "%PDF-1.4\nOld plan".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] next = "%PDF-1.7\nRevised plan".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        assertEquals(403, assertThrows(Problem.class, () ->
+            MainlineDocuments.upload(db,worker,10,"redline",0,new Upload(first),cloud)).status);
+        assertEquals(422, assertThrows(Problem.class, () ->
+            MainlineDocuments.upload(db,admin,10,"fiber",0,new Upload(image),cloud)).status);
+        MainlineDocuments.upload(db,admin,10,"redline",0,new Upload(first),cloud);
+        assertEquals(1, MainlineDocuments.list(db,worker,10).at("/redline/revision").asInt());
+        assertEquals(404, assertThrows(Problem.class, () ->
+            MainlineDocuments.download(db,other,10,"redline",()->cloud)).status);
+        assertArrayEquals(first,MainlineDocuments.download(db,worker,10,"redline",()->cloud));
+        assertEquals(409, assertThrows(Problem.class, () ->
+            MainlineDocuments.upload(db,admin,10,"redline",0,new Upload(next),cloud)).status);
+        assertEquals(1, objects.size());
+        MainlineDocuments.upload(db,admin,10,"redline",1,new Upload(next),null);
+        assertEquals(1,count("photo_cleanup"));
+        PhotoStorage.clean(db, cloud);
+        assertTrue(objects.isEmpty());
+        assertArrayEquals(next,MainlineDocuments.download(db,worker,10,"redline",()->null));
+        change(db, "UPDATE mainline_dailies SET date='2000-01-01' WHERE id=11");
+        assertEquals(404, assertThrows(Problem.class, () -> MainlineDocuments.list(db,worker,10)).status);
+        assertArrayEquals(next,MainlineDocuments.download(db,admin,10,"redline",()->null));
+    }
+
     @Test void cloudModeRequiresExplicitSecretsAndTrustedEndpoint() {
         assertNull(S3Photos.from(Map.of()));
         Map<String,String> invalid = new java.util.HashMap<>(Map.of(
