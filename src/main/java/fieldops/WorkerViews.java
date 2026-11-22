@@ -30,7 +30,7 @@ final class WorkerViews {
             JsonNode jobs = route.path("jobs");
             cards.append("<section class='panel worker-route'><div class='worker-route-team'><h2>")
                 .append(h(value(route, "team_name"))).append("</h2><p class='muted'>")
-                .append(h(value(route, "entity_name"))).append("</p>").append(vehicleLine(route)).append(urgentLink(jobs)).append("</div>");
+                .append(h(value(route, "entity_name"))).append("</p>").append(urgentLink(jobs)).append("</div>");
             for (JsonNode job : jobs) {
                 count++;
                 if (value(job, "status").equals("submitted")) submitted++;

@@ -160,7 +160,8 @@ final class AdminViews {
         page(res, user, title, nav(section) + "<div class='section-head'><h1>" + title + "</h1></div>" +
             "<form method='post' class='stack panel editor' action='" + h(path) + "'>" + alert(problem) + form +
             "<div class='actions'>" + link("Cancel", section.path, "btn secondary") + "<button>" +
-            (section == Section.ROUTES ? "Assign route" : "Save") + "</button></div></form>");
+            (section == Section.ROUTES ? "Assign route" : "Save") + "</button></div></form>" +
+            (section == Section.VEHICLES && record != null ? FleetImport.adminProfile(db,user,record) : ""));
     }
 
     static String payrollNav() { return navForPath("/payroll"); }

@@ -201,6 +201,7 @@ final class PgSchema {
                 );
                 """);
         }
+        FleetImport.initialize(db);
         MainlineSchema.initialize(db);
     }
 }

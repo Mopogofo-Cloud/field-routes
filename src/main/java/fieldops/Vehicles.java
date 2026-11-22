@@ -24,6 +24,7 @@ final class Vehicles {
                 """);
             sql.execute("CREATE INDEX IF NOT EXISTS route_vehicle_use ON route_vehicles(vehicle_id,route_id)");
         }
+        FleetImport.initialize(db);
     }
 
     private static final String BOOKED = """

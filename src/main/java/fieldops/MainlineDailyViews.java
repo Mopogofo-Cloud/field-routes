@@ -90,29 +90,45 @@ final class MainlineDailyViews {
         if (!candidates.isEmpty() || supervisorId == 0) form.append(contractorPicker(candidates, draft,
             picker.equals("all") ? "" : param(req, "contractor_search"), admin));
         form.append("<fieldset class='stack'><legend>Vehicles</legend><div class='actions'><button class='secondary' name='action' value='availability' formnovalidate>Check availability for date</button></div>");
-        var vehicles = Vehicles.list(db, vehicleDate);
-        var selected = idSet(draft.path("vehicle_ids"));
-        if (vehicles.isEmpty()) form.append(admin ? link("Add a vehicle", "/vehicles/new", "text-button") : "<p>No vehicles listed.</p>");
-        else form.append("<div class='choices'>");
-        for (var vehicle : vehicles) {
-            boolean available = vehicle.path("available").asBoolean();
-            String key = value(vehicle, "id");
-            form.append("<label><input type='checkbox' name='vehicle' value='").append(h(key)).append("'")
-                .append(available && selected.contains(key) ? " checked" : "").append(available ? "" : " disabled")
-                .append("><span>").append(h(value(vehicle, "name")));
-            for (String attr : new String[]{"brand", "plate"}) {
-                String detail = value(vehicle, attr);
-                if (!detail.isBlank()) form.append(" · ").append(h(detail));
-            }
-            if (!available) form.append(" · Assigned on ").append(h(vehicleDate));
-            form.append("</span></label>");
-        }
-        if (!vehicles.isEmpty()) form.append("</div>");
+        form.append(vehicleChoices(db,vehicleDate,java.util.List.of(),idSet(draft.path("vehicle_ids")),admin));
         form.append("</fieldset><div class='actions'>").append(link("Cancel", projectPath, "btn secondary"))
             .append("<button name='action' value='create'>Create daily report</button></div></form>");
         String heading = admin ? MainlineViews.heading("Assign daily crew", value(project, "name"), projectPath, "") :
             MainlineViews.workerHeading("Assign daily crew", value(project, "name"), projectPath, "");
         page(res, user, "Assign daily crew", heading + form);
+    }
+
+    private static String vehicleChoices(Connection db, String date, Iterable<JsonNode> assigned, Set<String> selected,
+                                         boolean admin) throws java.sql.SQLException {
+        var choices = new StringBuilder();
+        var assignedIds = new HashSet<String>();
+        for (var vehicle : assigned) {
+            assignedIds.add(value(vehicle,"id"));
+            vehicleChoice(choices,vehicle,admin,true,true);
+        }
+        for (var vehicle : Vehicles.list(db,date)) {
+            String key = value(vehicle,"id");
+            boolean available = vehicle.path("available").asBoolean();
+            if (assignedIds.contains(key) || (!available && !admin)) continue;
+            vehicleChoice(choices,vehicle,admin,available,available && selected.contains(key));
+        }
+        if (choices.isEmpty()) return admin ? link("Add a vehicle", "/vehicles/new", "text-button") :
+            "<p>No vehicles available for this date.</p>";
+        return "<div class='choices'>" + choices + "</div>";
+    }
+
+    private static void vehicleChoice(StringBuilder out, JsonNode vehicle, boolean admin, boolean available, boolean checked) {
+        out.append("<label><input type='checkbox' name='vehicle' value='").append(h(value(vehicle,"id"))).append("'")
+            .append(checked ? " checked" : "").append(available ? "" : " disabled")
+            .append("><span>").append(h(value(vehicle,"name")));
+        if (admin) {
+            for (String attr : new String[]{"brand","plate"}) {
+                String detail = value(vehicle,attr);
+                if (!detail.isBlank()) out.append(" · ").append(h(detail));
+            }
+        }
+        if (!available) out.append(" · Unavailable");
+        out.append("</span></label>");
     }
 
     private static void collectIds(HttpServletRequest req, String field, ArrayNode target) {
@@ -187,6 +203,11 @@ final class MainlineDailyViews {
                     if (version.isEmpty()) throw new Problem(409, "Reopen the crew to update its roles.");
                     for (var member : daily.path("members")) submittedRole(req, editedRoles, value(member, "id"));
                     Mainline.updateCrewRoles(db, user, dailyId, editedRoles, id(version));
+                } else if (action.equals("vehicles")) {
+                    if (version.isEmpty()) throw new Problem(409, "Reopen the daily crew to update its vehicles.");
+                    var vehicles = new HashSet<Long>();
+                    for (String vehicle : params(req, "vehicle")) vehicles.add(id(vehicle));
+                    Mainline.updateVehicles(db,user,dailyId,vehicles,id(version));
                 } else if (action.equals("remove") || action.equals("replace")) {
                     if (version.isEmpty() || id(version) != daily.path("crew_revision").asLong())
                         throw new Problem(409, "The crew changed. Review the current crew and choose the member again.");
@@ -231,7 +252,10 @@ final class MainlineDailyViews {
         else form.append("<form class='stack' method='post'>").append(hidden("crew_revision", value(daily, "crew_revision")))
             .append(contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
             .append("<div class='actions'><button name='action' value='add'>Add to daily crew</button></div></form>");
-        form.append("</section></div>");
+        form.append("</section><section class='panel stack' id='vehicles'><h2>Vehicles</h2><form class='stack' method='post'>")
+            .append(hidden("crew_revision",value(daily,"crew_revision")))
+            .append(vehicleChoices(db,value(daily,"date"),daily.path("vehicles"),Set.of(),admin))
+            .append("<div class='actions'><button name='action' value='vehicles'>Save vehicles</button></div></form></section></div>");
         String heading = admin ? MainlineViews.heading(title, backLabel, backPath, "") :
             MainlineViews.workerHeading(title, backLabel, backPath, "");
         page(res, user, title, heading + form);
@@ -329,7 +353,7 @@ final class MainlineDailyViews {
         String projectName = value(daily,"project_name");
         String title = projectName + " · " + value(daily,"date");
         String projectPath = "/mainline/projects/" + projectId;
-        String crewLink = "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Manage crew (opens in a new tab)</a>";
+        String crewLink = "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Manage crew and vehicles (opens in a new tab)</a>";
         String heading = admin ? MainlineViews.heading(title, "Project", projectPath, crewLink) :
             MainlineViews.workerHeading(title, "Project", projectPath, crewLink);
         var form = new StringBuilder("<div class='stack'>").append(heading);

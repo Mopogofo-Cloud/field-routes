@@ -66,6 +66,7 @@ class MainlineSupervisorTest {
         var dispatch = Mainline.dispatchProject(db,lead,project);
         assertFalse(dispatch.has("driver_cost"));
         assertFalse(dispatch.path("latest_daily").has("expenses"));
+        verifyAssignedVehicleProjection(db,admin,lead,project,current,planned);
         assertNull(member(Mainline.daily(db,admin,yesterday),2));
         assertTrue(member(Mainline.daily(db,lead,current),2).get("supervisor_only").asBoolean());
         assertTrue(Mainline.canManageCrew(db,lead,planned));
@@ -114,5 +115,29 @@ class MainlineSupervisorTest {
         assertEquals(404,assertThrows(Problem.class,() -> Mainline.daily(db,incoming,current)).status);
         assertFalse(Mainline.workerAssignments(db,incoming).at("/0/can_report").asBoolean());
         assertNull(member(Mainline.daily(db,admin,planned),3));
+    }
+
+    private static void verifyAssignedVehicleProjection(Connection db, ObjectNode admin, ObjectNode lead,
+                                                        long project, long today, long planned) throws Exception {
+        long unit = insertId(db,"INSERT INTO vehicles(name,brand,plate) VALUES('Rig 1','Private manufacturer','PRIVATE-VIN')");
+        long extra = insertId(db,"INSERT INTO vehicles(name,brand,plate) VALUES('Rig 2','Different brand','SECOND-VIN')");
+        for (long day : new long[]{today,planned}) {
+            long revision = Mainline.crewDaily(db,lead,day).path("crew_revision").asLong();
+            Mainline.updateVehicles(db,lead,day,java.util.Set.of(unit),revision);
+        }
+        change(db,"UPDATE vehicles SET name='Renamed unit',plate='REPLACED-VIN' WHERE id=?",unit);
+        var roster = Mainline.crewDaily(db,lead,today);
+        Mainline.updateVehicles(db,lead,today,java.util.Set.of(unit,extra),roster.path("crew_revision").asLong());
+        for (var record : java.util.List.of(Mainline.daily(db,lead,today),Mainline.crewDaily(db,lead,today),
+                Mainline.dispatchProject(db,lead,project).path("latest_daily"),
+                Mainline.scheduledDailies(db,lead,project).get(0),Mainline.dailies(db,lead,Db.today(),project).get(0))) {
+            var snapshot = record.at("/vehicles/0");
+            assertEquals(unit,snapshot.path("id").asLong());
+            assertEquals("Rig 1",snapshot.path("name").asText());
+            assertEquals(2,snapshot.size());
+        }
+        var fullUnit = Mainline.daily(db,admin,today).at("/vehicles/0");
+        assertEquals("Private manufacturer",fullUnit.path("brand").asText());
+        assertEquals("PRIVATE-VIN",fullUnit.path("plate").asText());
     }
 }

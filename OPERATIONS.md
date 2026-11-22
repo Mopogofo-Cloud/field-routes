@@ -60,6 +60,8 @@ For daily crew removals and replacements, apply [the crew changes migration](dep
 
 For Mainline daily roles, apply [the daily roles migration](deploy/migrations/20261121-mainline-daily-roles.sql) before deploying the Java service. Each crew assignment stores its role for that daily. Existing assignments start with an empty role.
 
+For imported vehicles, apply [the vehicle profiles migration](deploy/migrations/20261121-vehicle-source-profiles.sql) before deploying. With the Java service classpath and database settings, run `fieldops.FleetWorkbook workbook.xlsx vehicles.json` in a private directory. Run `fieldops.FleetImport --check vehicles.json`, then `--apply` and `--verify` with the same file. The workbook record ID identifies each vehicle. Admins can open its original worksheet details under **Vehicles**. Backup paths refer to files stored alongside the original workbook.
+
 ### Connect private Cloudflare R2 storage
 
 1. Enable R2 in the Cloudflare account and sign in as the configured Field Routes owner. Open **Photo storage** in the account header.

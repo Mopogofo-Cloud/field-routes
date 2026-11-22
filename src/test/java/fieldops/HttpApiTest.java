@@ -173,10 +173,12 @@ class HttpApiTest {
             long team = api("POST", "/teams", """
                 {"name":"West","member_ids":[%d],"entity_id":%d}
                 """.formatted(alex,entity), 201).get("id").longValue();
+            long bookedTruck = createFleetVehicle("Drops-Truck-34", "VIN-BOOKED");
             String route = """
-                {"team_id":%d,"date":"%s","addresses":[{"address":"8 A&B St, Apt #2","external_job_id":"0007-W"},"Second street"]}
-                """.formatted(team,today);
+                {"team_id":%d,"date":"%s","vehicle_ids":[%d],"addresses":[{"address":"8 A&B St, Apt #2","external_job_id":"0007-W"},"Second street"]}
+                """.formatted(team,today,bookedTruck);
             JsonNode assignedRoute = api("POST", "/routes", route, 201);
+            verifyFleetAccess(today, alex, casey, bookedTruck);
             long job = assignedRoute.at("/jobs/0/id").longValue();
             assertEquals("0007-W", assignedRoute.at("/jobs/0/external_job_id").asText());
             api("POST", "/routes", route, 409);
@@ -550,6 +552,70 @@ class HttpApiTest {
     private static void assertAccessDenied(HttpResponse<String> response) {
         assertTrue(response.statusCode() == 403 || response.statusCode() == 404,
             () -> response.request().method() + " " + response.uri() + " returned " + response.statusCode());
+    }
+
+    private long createFleetVehicle(String name, String plate) throws Exception {
+        redirectTarget(request("POST","/vehicles/new","name=" + name + "&brand=PrivateMake&plate=" + plate,
+            "application/x-www-form-urlencoded"));
+        try (var db = fixtureDatabase()) {
+            return StoreSql.one(db,"SELECT id FROM vehicles WHERE name=?",name).path("id").asLong();
+        }
+    }
+
+    private void verifyFleetAccess(String today, long lead, long member, long bookedTruck) throws Exception {
+        String form = "application/x-www-form-urlencoded";
+        long first = createFleetVehicle("Rig-A","VIN-FIRST");
+        long second = createFleetVehicle("Rig-B","VIN-SECOND");
+        assertTrue(request("GET","/vehicles/" + first,null,null).body().contains("VIN-FIRST"));
+        assertEquals("VIN-BOOKED",api("GET","/routes",null,200).at("/0/vehicles/0/plate").asText());
+
+        String supervisor = java.net.URLEncoder.encode("Alex (@alex, #" + lead + ")",java.nio.charset.StandardCharsets.UTF_8);
+        String project = redirectTarget(request("POST","/mainline/projects/new",
+            "name=Fleet+project&state=In+Progress&supervisor=" + supervisor,form));
+        String assign = project + "/dailies/new";
+        String past = redirectTarget(request("POST",assign,"date=2000-01-01&action=create",form));
+        String otherProject = redirectTarget(request("POST","/mainline/projects/new","name=Other+fleet+project&state=In+Progress",form));
+        String elsewhere = redirectTarget(request("POST",otherProject + "/dailies/new","date=" + today + "&member=" + member,form));
+
+        login("alex");
+        var dropsVehicles = api("GET","/routes",null,200).at("/0/vehicles");
+        assertTrue(dropsVehicles.isArray() && dropsVehicles.isEmpty());
+        String workerHome = request("GET","/",null,null).body();
+        assertFalse(workerHome.contains("Drops-Truck-34") || workerHome.contains("VIN-BOOKED"));
+        String pick = request("GET",assign,null,null).body();
+        assertTrue(pick.contains("Rig-A") && pick.contains("Rig-B"));
+        assertFalse(pick.contains("VIN-FIRST") || pick.contains("PrivateMake") || pick.contains("name='vehicle' value='" + bookedTruck + "'"));
+        assertAccessDenied(request("GET","/vehicles",null,null));
+        assertAccessDenied(request("GET","/vehicles/" + first,null,null));
+        assertAccessDenied(request("POST","/vehicles/" + first,"name=Changed&brand=Bad&plate=BAD",form));
+        String daily = redirectTarget(request("POST",assign,"date=" + today + "&action=create&member=" + member + "&vehicle=" + first,form));
+        String crew = daily + "/crew";
+        String change = "action=vehicles&crew_revision=0&vehicle=";
+        assertEquals(409,request("POST",assign,"date=" + today + "&action=create&vehicle=" + first,form).statusCode());
+        assertEquals(daily + "?saved=1",redirectTarget(request("POST",daily,"action=save&revision=0&comments=Before+fleet+change",form)));
+        assertAccessDenied(request("POST",elsewhere + "/crew",change + second,form));
+        assertAccessDenied(request("POST",past + "/crew",change + second,form));
+        assertEquals(409,request("POST",crew,change + bookedTruck,form).statusCode());
+        assertEquals(422,request("POST",crew,change + second + "&vehicle=999999",form).statusCode());
+        String stillAssigned = request("GET",daily,null,null).body();
+        assertTrue(stillAssigned.contains("Rig-A") && stillAssigned.contains("Before fleet change"));
+        String editor = request("GET",crew,null,null).body();
+        assertTrue(editor.contains("Rig-A") && editor.contains("Rig-B"));
+        assertFalse(editor.contains("VIN-FIRST") || editor.contains("PrivateMake"));
+        assertEquals(daily + "?crew=1",redirectTarget(request("POST",crew,change + second,form)));
+        assertEquals(409,request("POST",crew,change + first,form).statusCode());
+        String updated = request("GET",daily,null,null).body();
+        assertTrue(updated.contains("Rig-B") && updated.contains("Before fleet change") && !updated.contains("Rig-A"));
+        assertFalse(updated.contains("VIN-SECOND") || updated.contains("PrivateMake"));
+        login("casey");
+        assertAccessDenied(request("GET","/vehicles",null,null));
+        assertAccessDenied(request("GET",crew,null,null));
+        assertAccessDenied(request("POST",crew,"action=vehicles&crew_revision=1",form));
+        login("admin");
+        assertTrue(request("GET","/vehicles/" + second,null,null).body().contains("VIN-SECOND"));
+        assertEquals(past + "?crew=1",redirectTarget(request("POST",past + "/crew",change + second,form)));
+        assertEquals(daily + "?crew=1",redirectTarget(request("POST",crew,"action=vehicles&crew_revision=1",form)));
+        assertFalse(request("GET",daily,null,null).body().contains("Rig-B"));
     }
 
     private void verifyProjectSupervisor(String today, long alex, long blair, long casey, long devon) throws Exception {

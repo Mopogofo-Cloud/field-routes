@@ -267,12 +267,6 @@ public final class Store {
                 route.putArray("removed_jobs");
             }
         }
-        for (var node : rows(db, """
-                SELECT v.route_id,v.vehicle_id AS id,v.name,v.brand,v.plate FROM route_vehicles v JOIN routes r ON r.id=v.route_id
-                """ + scope + " ORDER BY v.route_id,v.name,v.vehicle_id", args)) {
-            var vehicle = (ObjectNode) node;
-            byRoute.get(vehicle.remove("route_id").asLong()).withArray("vehicles").add(vehicle);
-        }
         String memberFields = admin ? "a.name,a.role,a.pay_basis,a.rate_cents/100.0 AS pay_rate," : "";
         for (JsonNode node : rows(db, "SELECT " + memberFields + """
                 a.person_id AS id,a.route_id FROM assignments a JOIN routes r ON r.id=a.route_id
@@ -297,6 +291,12 @@ public final class Store {
             addPhoto(byJob.get(photo.get("job_id").longValue()), photo.get("id").longValue());
         }
         if (admin) {
+            for (var node : rows(db, """
+                    SELECT v.route_id,v.vehicle_id AS id,v.name,v.brand,v.plate FROM route_vehicles v JOIN routes r ON r.id=v.route_id
+                    """ + scope + " ORDER BY v.route_id,v.name,v.vehicle_id", args)) {
+                var vehicle = (ObjectNode) node;
+                byRoute.get(vehicle.remove("route_id").asLong()).withArray("vehicles").add(vehicle);
+            }
             for (JsonNode node : rows(db, """
                 SELECT j.route_id,j.id,j.address,j.external_job_id,j.stop_label,j.urgent,x.position,x.removed_at FROM job_removals x
                 JOIN jobs j ON j.id=x.job_id JOIN routes r ON r.id=j.route_id

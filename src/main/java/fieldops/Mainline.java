@@ -75,7 +75,7 @@ final class Mainline {
             if (admin(user)) return readProject(db, projectId);
             var project = dispatchDetails(db, user, projectId);
             var latest = loadDailies(db, " WHERE d.id=(SELECT id FROM mainline_dailies WHERE project_id=? ORDER BY date DESC,id DESC LIMIT 1)",
-                List.of(projectId), true);
+                List.of(projectId), true, false);
             project.set("latest_daily", latest.isEmpty() ? null : latest.get(0));
             return project;
         });
@@ -84,7 +84,7 @@ final class Mainline {
     static ArrayNode scheduledDailies(Connection db, ObjectNode user, long projectId) throws SQLException {
         return transaction(db, false, () -> {
             dispatchDetails(db, user, projectId);
-            return loadDailies(db, " WHERE d.project_id=? AND d.date>=?", List.of(projectId, Db.today()), true);
+            return loadDailies(db, " WHERE d.project_id=? AND d.date>=?", List.of(projectId, Db.today()), true, admin(user));
         });
     }
 
@@ -94,7 +94,7 @@ final class Mainline {
         projectFields(result);
         var latest = one(db,"SELECT id FROM mainline_dailies WHERE project_id=? ORDER BY date DESC,id DESC LIMIT 1",id);
         if (latest == null) result.putNull("latest_daily");
-        else result.set("latest_daily",loadDailies(db," WHERE d.id=?",List.of(latest.path("id").asLong()),true).get(0));
+        else result.set("latest_daily",loadDailies(db," WHERE d.id=?",List.of(latest.path("id").asLong()),true,true).get(0));
         return result;
     }
 
@@ -228,7 +228,7 @@ final class Mainline {
         if (date!=null) { condition.append(" AND d.date=?"); args.add(date); }
         if (projectId!=null) { condition.append(" AND d.project_id=?"); args.add(projectId); }
         if (!admin(user)) { condition.append(REPORT_SCOPE); args.add(user.path("id").asLong()); }
-        return transaction(db,false,()->loadDailies(db,condition.toString(),args));
+        return transaction(db,false,()->loadDailies(db,condition.toString(),args,false,admin(user)));
     }
 
     private static final String REPORT_SCOPE =
@@ -296,7 +296,7 @@ final class Mainline {
 
     private static ObjectNode readCrewDaily(Connection db, ObjectNode user, long dailyId) throws SQLException {
         requireCrewManagement(db,user,dailyId);
-        return (ObjectNode) loadDailies(db, " WHERE d.id=?", List.of(dailyId), true).get(0);
+        return (ObjectNode) loadDailies(db, " WHERE d.id=?", List.of(dailyId), true, admin(user)).get(0);
     }
 
     private static String dailyScope(ObjectNode user) {
@@ -313,20 +313,16 @@ final class Mainline {
     }
 
     static ObjectNode readDaily(Connection db,ObjectNode user,long id) throws SQLException {
-        ArrayNode result=loadDailies(db,dailyScope(user),dailyArgs(user,id));
+        ArrayNode result=loadDailies(db,dailyScope(user),dailyArgs(user,id),false,admin(user));
         if (result.isEmpty()) throw new Problem(404,"Mainline daily not found.");
         return (ObjectNode)result.get(0);
     }
 
     static ArrayNode readProjectDailies(Connection db,long projectId) throws SQLException {
-        return loadDailies(db," WHERE d.project_id=?",List.of(projectId));
+        return loadDailies(db," WHERE d.project_id=?",List.of(projectId),false,true);
     }
 
-    private static ArrayNode loadDailies(Connection db,String scope,List<?> arguments) throws SQLException {
-        return loadDailies(db,scope,arguments,false);
-    }
-
-    private static ArrayNode loadDailies(Connection db,String scope,List<?> arguments,boolean scheduleOnly) throws SQLException {
+    private static ArrayNode loadDailies(Connection db,String scope,List<?> arguments,boolean scheduleOnly,boolean vehicleDetails) throws SQLException {
         Object[] args=arguments.toArray();
         String fields = scheduleOnly ? "d.id,d.project_id,d.date,d.crew_revision,p.supervisor_person_id" : "d.*";
         var list=rows(db,"SELECT " + fields + ", p.name AS project_name FROM mainline_dailies d " + """
@@ -365,10 +361,10 @@ final class Mainline {
             daily.withArray("members").add(member);
             if(driver) daily.withArray("driver_ids").add(member.path("id").asLong());
         }
-        for (var node:rows(db,"""
-                SELECT v.daily_id,v.vehicle_id AS id,v.name,v.brand,v.plate FROM mainline_dailies d
-                JOIN mainline_daily_vehicles v ON v.daily_id=d.id
-                """+scope+" ORDER BY v.daily_id,lower(v.name),v.vehicle_id",args)) {
+        String vehicleFields = vehicleDetails ? "v.name,v.brand,v.plate" : "v.name";
+        for (var node:rows(db,"SELECT v.daily_id,v.vehicle_id AS id," + vehicleFields
+                + " FROM mainline_dailies d JOIN mainline_daily_vehicles v ON v.daily_id=d.id"
+                + scope + " ORDER BY v.daily_id,lower(v.name),v.vehicle_id",args)) {
             var vehicle=(ObjectNode)node;
             byId.get(vehicle.remove("daily_id").asLong()).withArray("vehicles").add(vehicle);
         }
@@ -402,19 +398,42 @@ final class Mainline {
                 VALUES(?,?,?,?,?,?)
                 """,projectId,date,values.footage,values.expenses,values.priority,values.comments);
             insertDailyMembers(db, id, members, drivers, autoMember, roles);
-            if (!vehicles.isEmpty()) {
-                var available=new HashMap<Long,JsonNode>();
-                for (var vehicle:Vehicles.list(db,date)) available.put(vehicle.path("id").asLong(),vehicle);
-                for (long vehicleId:vehicles) {
-                    var vehicle=available.get(vehicleId);
-                    if (vehicle==null) throw new Problem(422,"Select a vehicle in the vehicle list.");
-                    if (!vehicle.path("available").asBoolean())
-                        throw new Problem(409,vehicle.path("name").asText()+" is already assigned on "+date+".");
-                    change(db,"INSERT INTO mainline_daily_vehicles(daily_id,vehicle_id,name,brand,plate) VALUES(?,?,?,?,?)",
-                           id,vehicleId,vehicle.get("name").asText(),vehicle.get("brand").asText(),vehicle.get("plate").asText());
-                }
-            }
+            assignVehicles(db,id,date,vehicles);
             return !admin(user) && !date.equals(Db.today()) ? readCrewDaily(db,user,id) : readDaily(db,user,id);
+        });
+    }
+
+    private static void assignVehicles(Connection db,long dailyId,String date,Set<Long> ids) throws SQLException {
+        if (ids.isEmpty()) return;
+        var additions = new LinkedHashSet<>(ids);
+        for (var vehicle : Vehicles.list(db,date)) {
+            long id = vehicle.get("id").asLong();
+            if (!additions.remove(id)) continue;
+            if (!vehicle.get("available").asBoolean())
+                throw new Problem(409,"A selected vehicle is unavailable on " + date + ". Review the available vehicles.");
+            change(db,"INSERT INTO mainline_daily_vehicles(daily_id,vehicle_id,name,brand,plate) VALUES(?,?,?,?,?)",
+                dailyId,id,vehicle.get("name").asText(),vehicle.get("brand").asText(),vehicle.get("plate").asText());
+        }
+        if (!additions.isEmpty()) throw new Problem(422,"Select a vehicle in the vehicle list.");
+    }
+
+    static ObjectNode updateVehicles(Connection db,ObjectNode user,long dailyId,Set<Long> selected,long crewRevision) throws SQLException {
+        return transaction(db,true,()->{
+            var daily = readCrewDaily(db,user,dailyId);
+            checkCrewRevision(daily,crewRevision);
+            var additions = new LinkedHashSet<>(selected);
+            var removals = new LinkedHashSet<Long>();
+            for (var assigned : daily.path("vehicles")) {
+                long id = assigned.get("id").asLong();
+                if (!additions.remove(id)) removals.add(id);
+            }
+            if (additions.isEmpty() && removals.isEmpty()) return daily;
+            // Retained assignments keep their original unit, brand and plate snapshots.
+            assignVehicles(db,dailyId,daily.get("date").asText(),additions);
+            for (long id : removals)
+                change(db,"DELETE FROM mainline_daily_vehicles WHERE daily_id=? AND vehicle_id=?",dailyId,id);
+            advanceCrewRevision(db,dailyId);
+            return readCrewDaily(db,user,dailyId);
         });
     }
 

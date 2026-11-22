@@ -122,7 +122,7 @@ final class MainlineViews {
                 .append(day.path("id").asLong()).append("</h3><p>").append(h(names.toString()))
                 .append("</p>").append(vehicleLine(day)).append("<div class='actions'>");
             if (date.equals(value(user, "today"))) body.append(link("Open report", dailyPath, "btn"));
-            body.append(link("Manage crew", dailyPath + "/crew", "btn secondary")).append("</div></article>");
+            body.append(link("Manage crew and vehicles", dailyPath + "/crew", "btn secondary")).append("</div></article>");
         }
         page(res, user, title, body.append("</section></div>").toString());
     }

@@ -19,8 +19,8 @@ import java.util.TreeSet;
 /** Offline migration utility. Both the import and its independent verification use a single source snapshot. */
 public final class PostgresImport {
     private static final String SCHEMA = PgSchema.NAME;
-    // The standalone WG iDig roster import added these only on sites which ran it.
-    private static final Set<String> OPTIONAL = Set.of("wgidig_roster_import", "wgidig_roster_links");
+    // Older SQLite installations can predate the roster and fleet imports.
+    private static final Set<String> OPTIONAL = Set.of("wgidig_roster_import", "wgidig_roster_links", "vehicle_source_profiles");
 
     private PostgresImport() {}
 
