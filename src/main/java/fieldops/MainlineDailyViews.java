@@ -389,7 +389,8 @@ final class MainlineDailyViews {
         String title = projectName + " · " + value(daily,"date");
         String projectPath = "/mainline/projects/" + projectId;
         String crewLink = "<a class='btn secondary' href='" + path + "/crew' target='_blank' rel='noopener'>Manage crew and vehicles (opens in a new tab)</a>";
-        String heading = admin ? MainlineViews.heading(title, "Project", projectPath, crewLink) :
+        String heading = admin ? MainlineViews.heading(title, "Project", projectPath, crewLink +
+            link("Delete daily report", path + "/delete", "btn secondary remove-stop")) :
             MainlineViews.workerHeading(title, "Project", projectPath, crewLink);
         var form = new StringBuilder("<div class='stack'>").append(heading);
         if (param(req,"saved").equals("1") && !post) form.append(notice("Daily report saved."));

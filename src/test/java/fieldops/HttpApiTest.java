@@ -359,7 +359,8 @@ class HttpApiTest {
         assertTrue(picker.body().contains("name='member' value='" + secondMember + "'>"));
         assertRolePicker(picker.body(),worker,"Machine Operator");
         assertRolePicker(picker.body(),secondMember,"");
-        String member = "&action=create&member=" + worker;
+        long projectTruck = createFleetVehicle("Project-truck", "Fixture-plate");
+        String member = "&action=create&member=" + worker + "&vehicle=" + projectTruck;
         String earlier = redirectTarget(request("POST", assign, "date=2000-01-01" + member + "&role_" + worker + "=Trencher", form));
         String daily = redirectTarget(request("POST", assign, "date=" + today + member + "&member=" + secondMember
             + "&role_" + worker + "=Machine+Operator&role_" + secondMember + "=Locator", form));
@@ -547,6 +548,91 @@ class HttpApiTest {
         assertTrue(dailies.contains("North crossing verified") && dailies.contains("242.5"));
         assertFalse(dailies.contains("2000-01-01"));
         assertEquals(photoPage + "#media-pictures", redirectTarget(request("POST",photoPath + "/remove","",form)));
+        verifyMainlineDeletion(project, daily, earlier, independent, today, worker, projectTruck);
+    }
+
+    private String deleteToken(String path, String... summary) throws Exception {
+        var preview = request("GET",path + "/delete",null,null);
+        assertEquals(200,preview.statusCode());
+        for (String detail : summary) assertTrue(preview.body().contains(detail),detail);
+        var token = java.util.regex.Pattern.compile("name='token' value='([^']+)'").matcher(preview.body());
+        assertTrue(token.find(),"Missing deletion confirmation token for " + path);
+        return "token=" + java.net.URLEncoder.encode(token.group(1),java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private void verifyMainlineDeletion(String project, String daily, String sibling, String independent,
+                                        String today, long worker, long truck) throws Exception {
+        String form = "application/x-www-form-urlencoded";
+        long projectId = Long.parseLong(project.substring(project.lastIndexOf('/') + 1));
+        long dayId = Long.parseLong(daily.substring(daily.lastIndexOf('/') + 1));
+        long siblingId = Long.parseLong(sibling.substring(sibling.lastIndexOf('/') + 1));
+        String cloud = "deletion-test-storage";
+        // Seed cloud references without ever opening a real storage connection.
+        try (var db = fixtureDatabase()) {
+            StoreSql.change(db,"INSERT INTO mainline_media(daily_id,category,mime,byte_count,destination,object_key,sha256) " +
+                "VALUES(?,'pictures','image/png',1,?,'daily-photo','fixture'),(?,'map','image/png',1,?,'sibling-map','fixture')",
+                dayId,cloud,siblingId,cloud);
+            StoreSql.change(db,"INSERT INTO mainline_project_documents(project_id,kind,revision,updated_at,byte_count,sha256,destination,object_key) " +
+                "VALUES(?,'locates',1,?,1,'fixture',?,'project-document')",projectId,today,cloud);
+        }
+        String dayToken = deleteToken(daily,"Hill Road",today,"2 photos");
+        String projectToken = deleteToken(project,"Hill Road","2 daily reports","3 photos","2 project documents");
+        for (String path : java.util.List.of(project,daily)) {
+            assertTrue(request("GET",path,null,null).body().contains("href='" + path + "/delete'"));
+        }
+        for (String account : java.util.List.of("alex","devon")) { // Project supervisor and assigned contractor.
+            login(account);
+            for (String path : java.util.List.of(project,daily)) {
+                assertFalse(request("GET",path,null,null).body().contains("href='" + path + "/delete'"));
+                assertAccessDenied(request("GET",path + "/delete",null,null));
+                String validToken = path.equals(project) ? projectToken : dayToken;
+                assertAccessDenied(request("POST",path + "/delete",validToken + "&confirm=delete",form));
+            }
+        }
+        login("admin");
+        assertEquals(422,request("POST",daily + "/delete",dayToken,form).statusCode());
+        assertEquals(422,request("POST",project + "/delete",projectToken,form).statusCode());
+        assertEquals(200,request("GET",daily,null,null).statusCode());
+        assertEquals(200,request("GET",project + "/documents/fiber",null,null).statusCode());
+
+        var photo = uploadFile(daily + "/media/receipts","latest","photos","image/png",reportPng(2));
+        assertEquals(303,photo.statusCode());
+        assertEquals(409,request("POST",daily + "/delete",dayToken + "&confirm=delete",form).statusCode());
+        projectToken = deleteToken(project,"4 photos");
+        String confirmed = deleteToken(daily,"3 photos") + "&confirm=delete";
+        assertEquals(project,redirectTarget(request("POST",daily + "/delete",confirmed,form)));
+        assertEquals(404,request("POST",daily + "/delete",confirmed,form).statusCode());
+        assertEquals(404,request("GET",daily,null,null).statusCode());
+        assertEquals(200,request("GET",sibling,null,null).statusCode());
+        assertEquals(200,request("GET",project + "/documents/fiber",null,null).statusCode());
+        try (var db = fixtureDatabase()) {
+            for (String table : java.util.List.of("mainline_media","mainline_daily_members","mainline_daily_vehicles")) {
+                assertTrue(StoreSql.rows(db,"SELECT daily_id FROM " + table + " WHERE daily_id=?",dayId).isEmpty(),table);
+            }
+            var cleanup = StoreSql.rows(db,"SELECT object_key FROM photo_cleanup WHERE destination=?",cloud);
+            assertEquals(1,cleanup.size());
+            assertEquals("daily-photo",cleanup.at("/0/object_key").asText());
+        }
+        // The released crew and truck can be dispatched again on the same day.
+        String otherDaily = redirectTarget(request("POST",independent + "/dailies/new",
+            "date=" + today + "&action=create&member=" + worker + "&vehicle=" + truck,form));
+        assertTrue(otherDaily.matches("/mainline/dailies/[0-9]+"));
+        assertEquals(409,request("POST",project + "/delete",projectToken + "&confirm=delete",form).statusCode());
+        String confirmProject = deleteToken(project,"1 daily report","1 photo","2 project documents") + "&confirm=delete";
+        assertEquals("/mainline/projects",redirectTarget(request("POST",project + "/delete",confirmProject,form)));
+        for (String path : java.util.List.of(project,sibling,project + "/documents/fiber",project + "/delete")) {
+            assertEquals(404,request("GET",path,null,null).statusCode(),path);
+        }
+        assertEquals(200,request("GET",independent,null,null).statusCode());
+        assertTrue(request("GET",otherDaily,null,null).body().contains("Project-truck"));
+        try (var db = fixtureDatabase()) {
+            assertTrue(StoreSql.rows(db,"SELECT kind FROM mainline_project_documents WHERE project_id=?",projectId).isEmpty());
+            assertTrue(StoreSql.rows(db,"SELECT id FROM mainline_dailies WHERE project_id=?",projectId).isEmpty());
+            var cleanup = StoreSql.rows(db,"SELECT object_key FROM photo_cleanup WHERE destination=? ORDER BY object_key",cloud);
+            assertEquals(3,cleanup.size());
+            assertEquals("project-document",cleanup.at("/1/object_key").asText());
+            assertEquals("sibling-map",cleanup.at("/2/object_key").asText());
+        }
     }
 
     private static void assertAccessDenied(HttpResponse<String> response) {

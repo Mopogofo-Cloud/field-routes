@@ -98,7 +98,7 @@ final class Views {
         if (JobReportExport.PATH.equals(target) || JobReportExport.DOWNLOAD.equals(target)) return JobReportExport.PATH;
         if ("/payroll".equals(target) || "/payroll/check-settings".equals(target) || PayrollChecks.SAMPLE_DOWNLOAD.equals(target)) return target;
         if (target != null && target.matches("/entities(?:/[0-9]+(?:/(?:payroll|rates))?)?")) return target;
-        if (target != null && (target.matches("/mainline(?:/projects(?:/new|/[0-9]+(?:/edit|/dailies/new)?)?|/dailies/[0-9]+(?:/photos|/crew)?)?") ||
+        if (target != null && (target.matches("/mainline(?:/projects(?:/new|/[0-9]+(?:/edit|/delete|/dailies/new)?)?|/dailies/[0-9]+(?:/photos|/crew|/delete)?)?") ||
             target.equals("/routes/drops"))) return target;
         return LoginSheet.PATH.equals(target) || R2Setup.PATH.equals(target) ? target : "";
     }

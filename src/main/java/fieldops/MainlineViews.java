@@ -41,6 +41,8 @@ final class MainlineViews {
         }
         if (path.equals("/mainline/projects/new") || path.matches("/mainline/projects/[0-9]+/edit")) {
             editor(req, res, db, user, parts[3].equals("new") ? null : id(parts[3]), post);
+        } else if (path.matches("/mainline/(projects|dailies)/[0-9]+/delete")) {
+            deletion(req, res, db, user, id(parts[3]), parts[2].equals("projects"), post);
         } else if (path.matches("/mainline/projects/[0-9]+/export")) {
             if (!post) throw new Problem(405, "Select dailies on the project page to export.");
             MainlineExport.download(req, res, db, user, id(parts[3]));
@@ -82,6 +84,52 @@ final class MainlineViews {
             "<header class='section-head'><h1>" + h(title) + "</h1><div class='actions'>" + actions + "</div></header>";
     }
     static String empty(String message) { return "<p class='panel empty'>" + h(message) + "</p>"; }
+
+    private static void deletion(HttpServletRequest req, HttpServletResponse res, Connection db, ObjectNode user,
+                                 long id, boolean project, boolean post) throws Exception {
+        String action = project ? "Delete project" : "Delete daily report";
+        String problem = "";
+        if (post) {
+            try {
+                String token = param(req, "token");
+                if (!"delete".equals(param(req, "confirm")) || token.isBlank())
+                    throw new Problem(422, "Review the details and confirm the deletion.");
+                if (project) {
+                    Mainline.deleteProject(db, user, id, token);
+                    redirect(res, "/mainline/projects");
+                } else {
+                    long projectId = Mainline.deleteDaily(db, user, id, token);
+                    redirect(res, "/mainline/projects/" + projectId);
+                }
+                return;
+            } catch (Problem err) {
+                if (err.status != 409 && err.status != 422) throw err;
+                res.setStatus(err.status);
+                problem = err.getMessage();
+            }
+        }
+        var preview = project ? Mainline.projectDeletion(db, user, id) : Mainline.dailyDeletion(db, user, id);
+        String back = (project ? "/mainline/projects/" : "/mainline/dailies/") + id;
+        String name = h(value(preview, "project_name"));
+        String identity = project ? name + " · Project #" + id :
+            name + " · " + h(value(preview, "date")) + " · Daily #" + id;
+        String photos = count(preview, "photo_count", "photo");
+        String counts = project ? count(preview, "daily_count", "daily report") + " · " + photos +
+            " · " + count(preview, "document_count", "project document") : photos;
+        String impact = project ?
+            "Deleting this project permanently removes all its daily reports, photos, and project documents." :
+            "Deleting this daily report permanently removes its footage, expenses, comments, photos, and crew and vehicle assignments.";
+        String form = "<form method='post' class='panel stack editor'>" + alert(problem) +
+            "<h2>" + identity + "</h2><p>" + impact + "</p><p>" + counts + "</p>" +
+            hidden("token", value(preview, "token")) + "<div class='actions'>" + link("Cancel", back, "btn secondary") +
+            "<button class='secondary remove-stop' type='submit' name='confirm' value='delete'>" + action + "</button></div></form>";
+        page(res, user, action, heading(action, project ? "Project" : "Daily report", back, "") + form);
+    }
+
+    private static String count(JsonNode preview, String key, String label) {
+        long total = preview.path(key).asLong();
+        return total + " " + label + (total == 1 ? "" : "s");
+    }
 
     static String dailyCards(ArrayNode list) {
         StringBuilder out = new StringBuilder("<div class='stack'>");
@@ -196,6 +244,7 @@ final class MainlineViews {
         var days = Mainline.dailies(db, user, null, id);
         String name = value(project, "name");
         var info = new StringBuilder(heading(name, "Projects", "/mainline/projects",
+            link("Delete project", path + "/delete", "btn secondary remove-stop") +
             link("Edit project", path + "/edit", "btn secondary") + link("Create daily", path + "/dailies/new", "btn")));
         info.append("<section class='panel stack'><h2>Project details</h2><dl class='project-facts'>");
         String[][] facts = {

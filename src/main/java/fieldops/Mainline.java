@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -112,7 +113,70 @@ final class Mainline {
     private static boolean admin(ObjectNode user) { return user.path("is_admin").asBoolean(); }
 
     private static void requireAdmin(ObjectNode user) {
-        if (!admin(user)) throw new Problem(403,"Administrator access required.");
+        if (user == null || !admin(user)) throw new Problem(403,"Administrator access required.");
+    }
+
+    static ObjectNode projectDeletion(Connection db, ObjectNode user, long id) throws SQLException {
+        requireAdmin(user);
+        return transaction(db, false, () -> deletionSummary(db, id, true));
+    }
+
+    static ObjectNode dailyDeletion(Connection db, ObjectNode user, long id) throws SQLException {
+        requireAdmin(user);
+        return transaction(db, false, () -> deletionSummary(db, id, false));
+    }
+
+    private static ObjectNode deletionSummary(Connection db, long id, boolean wholeProject) throws SQLException {
+        var target = wholeProject
+            ? one(db, "SELECT id AS project_id,name AS project_name,revision FROM mainline_projects WHERE id=?", id)
+            : one(db, """
+                SELECT d.id,d.date,p.id AS project_id,p.name AS project_name FROM mainline_dailies d
+                JOIN mainline_projects p ON p.id=d.project_id WHERE d.id=?
+                """, id);
+        if (target == null) throw new Problem(404, wholeProject ? "Mainline project not found." : "Daily report not found.");
+
+        // A gallery can change without changing the report revision. Photo IDs are immutable and increasing.
+        var reports = rows(db, """
+            SELECT d.id,d.revision,d.crew_revision,count(m.id) AS photo_count,max(m.id) AS latest_photo
+            FROM mainline_dailies d LEFT JOIN mainline_media m ON m.daily_id=d.id WHERE %s=?
+            GROUP BY d.id,d.revision,d.crew_revision ORDER BY d.id
+            """.formatted(wholeProject ? "d.project_id" : "d.id"), id);
+        var documents = wholeProject ? rows(db, """
+            SELECT kind,revision FROM mainline_project_documents WHERE project_id=? ORDER BY kind
+            """, id) : App.JSON.createArrayNode();
+        var snapshot = App.JSON.createArrayNode().add(target).add(reports).add(documents);
+        String token = S3Photos.sha256(snapshot.toString().getBytes(StandardCharsets.UTF_8));
+        long photos = 0;
+        for (var report : reports) photos += report.path("photo_count").asLong();
+        target.remove("revision");
+        return target.put("daily_count", reports.size()).put("photo_count", photos)
+            .put("document_count", documents.size()).put("token", token);
+    }
+
+    private static void checkDeletion(ObjectNode summary, String token) {
+        if (!summary.path("token").asText().equals(token))
+            throw new Problem(409, "The deletion details changed. Review them again before deleting.");
+    }
+
+    static void deleteProject(Connection db, ObjectNode user, long id, String token) throws SQLException {
+        requireAdmin(user);
+        transaction(db, true, () -> {
+            checkDeletion(deletionSummary(db, id, true), token);
+            // Child cascades remove assignments and enqueue cloud files for the existing cleanup worker.
+            change(db, "DELETE FROM mainline_dailies WHERE project_id=?", id);
+            change(db, "DELETE FROM mainline_projects WHERE id=?", id);
+            return null;
+        });
+    }
+
+    static long deleteDaily(Connection db, ObjectNode user, long id, String token) throws SQLException {
+        requireAdmin(user);
+        return transaction(db, true, () -> {
+            var summary = deletionSummary(db, id, false);
+            checkDeletion(summary, token);
+            change(db, "DELETE FROM mainline_dailies WHERE id=?", id);
+            return summary.path("project_id").asLong();
+        });
     }
 
     private static String optionalString(ObjectNode input, String key, int limit) {
