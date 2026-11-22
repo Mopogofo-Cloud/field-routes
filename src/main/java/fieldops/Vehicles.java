@@ -1,10 +1,12 @@
 package fieldops;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Set;
+import java.util.regex.Pattern;
 import static fieldops.StoreSql.*;
 
 final class Vehicles {
@@ -35,9 +37,44 @@ final class Vehicles {
         """;
 
     static ArrayNode list(Connection db, String date, long teamId) throws SQLException {
-        return rows(db, "SELECT v.id,v.name,v.brand,v.plate,p.source_record_id,CASE WHEN " + BOOKED +
+        return list(db, date, teamId, "");
+    }
+
+    static ArrayNode mainlineChoices(Connection db, String date) throws SQLException {
+        // Only the two workbook fields used by this picker are read from the private profile.
+        String profile = postgres(db) ? "(p.source_record::jsonb)" : "p.source_record";
+        return list(db, date, 0, profile + " ->> 'company_code' AS company_code, " +
+            profile + " ->> 'model' AS model, ");
+    }
+
+    private static ArrayNode list(Connection db, String date, long teamId, String extraColumns) throws SQLException {
+        return rows(db, "SELECT v.id,v.name,v.brand,v.plate,p.source_record_id," + extraColumns + "CASE WHEN " + BOOKED +
             " THEN 0 ELSE 1 END AS available FROM vehicles v LEFT JOIN vehicle_source_profiles p ON p.vehicle_id=v.id" +
             " ORDER BY lower(v.name),v.id", StoreInput.date(date), teamId, date);
+    }
+
+    private static final Pattern NON_ALPHANUMERIC = Pattern.compile("[^\\p{L}\\p{N}]+");
+
+    private static String searchKey(String text) {
+        return NON_ALPHANUMERIC.matcher(AdminViews.searchText(text)).replaceAll("");
+    }
+
+    static boolean matchesSearch(JsonNode vehicle, String query) {
+        if (query.isBlank()) return true;
+        var fields = new java.util.StringJoiner(" ");
+        for (String key : new String[]{"name", "company_code", "model", "source_record_id"}) {
+            String value = vehicle.path(key).asText("");
+            if (!value.isBlank() && !"N/A".equalsIgnoreCase(value.strip())) fields.add(searchKey(value));
+        }
+        String searchable = fields.toString();
+        boolean hasTerm = false;
+        for (String word : query.strip().split("\\s+")) {
+            String term = searchKey(word);
+            if (term.isEmpty()) continue;
+            if (!searchable.contains(term)) return false;
+            hasTerm = true;
+        }
+        return hasTerm;
     }
 
     static ArrayNode list(Connection db, String date) throws SQLException {

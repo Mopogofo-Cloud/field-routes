@@ -73,6 +73,8 @@ final class MainlineDailyViews {
             problem = "Choose today or a future work date.";
         }
         var form = new StringBuilder("<form class='panel stack editor' method='post'>").append(alert(problem))
+            // Enter in either search field applies the filters, even when the previous-crew button is present.
+            .append("<button type='submit' name='picker' value='filter' formnovalidate hidden>Search</button>")
             .append("<p class='helper'>Select the contractors working on this project for the work date.</p>")
             .append(field("Work date", "date", date, "type='date' required" + (admin ? "" : " min='" + h(today) + "'")));
         if (supervisorId != 0) {
@@ -89,8 +91,8 @@ final class MainlineDailyViews {
         form.append("</div>");
         if (!candidates.isEmpty() || supervisorId == 0) form.append(contractorPicker(candidates, draft,
             picker.equals("all") ? "" : param(req, "contractor_search"), admin));
-        form.append("<fieldset class='stack'><legend>Vehicles</legend><div class='actions'><button class='secondary' name='action' value='availability' formnovalidate>Check availability for date</button></div>");
-        form.append(vehicleChoices(db,vehicleDate,java.util.List.of(),idSet(draft.path("vehicle_ids")),admin));
+        form.append("<fieldset class='stack' id='vehicles'><legend>Vehicles</legend><div class='actions'><button class='secondary' name='action' value='availability' formaction='#vehicles' formnovalidate>Check availability for date</button></div>");
+        form.append(vehicleChoices(req,db,vehicleDate,java.util.List.of(),idSet(draft.path("vehicle_ids")),admin));
         form.append("</fieldset><div class='actions'>").append(link("Cancel", projectPath, "btn secondary"))
             .append("<button name='action' value='create'>Create daily report</button></div></form>");
         String heading = admin ? MainlineViews.heading("Assign daily crew", value(project, "name"), projectPath, "") :
@@ -98,23 +100,45 @@ final class MainlineDailyViews {
         page(res, user, "Assign daily crew", heading + form);
     }
 
-    private static String vehicleChoices(Connection db, String date, Iterable<JsonNode> assigned, Set<String> selected,
+    private static String vehicleChoices(HttpServletRequest req, Connection db, String date, Iterable<JsonNode> assigned, Set<String> selected,
                                          boolean admin) throws java.sql.SQLException {
-        var choices = new StringBuilder();
-        var assignedIds = new HashSet<String>();
-        for (var vehicle : assigned) {
-            assignedIds.add(value(vehicle,"id"));
-            vehicleChoice(choices,vehicle,admin,true,true);
-        }
-        for (var vehicle : Vehicles.list(db,date)) {
+        String picker = param(req,"picker");
+        String query = picker.equals("all-vehicles") ? "" : param(req,"vehicle_search").strip();
+        if (query.length()>250) throw new Problem(422,"Enter a shorter vehicle search.");
+        var fleet = Vehicles.mainlineChoices(db,date);
+        if (fleet.isEmpty()) return admin ? link("Add a vehicle", "/vehicles/new", "text-button") : "<p>No vehicles available for this date.</p>";
+        var out = new StringBuilder("<div class='contractor-search'>")
+            .append(field("Find vehicle","vehicle_search",query,
+                "type='search' placeholder='Company code, model or record ID' maxlength='250' autocomplete='off' enterkeyhint='search'" +
+                (picker.equals("filter") && !query.isEmpty() ? " autofocus" : "")))
+            .append("<button type='submit' class='secondary' name='picker' value='search-vehicles' formaction='#vehicles' formnovalidate>Search vehicles</button>");
+        if (!query.isEmpty()) out.append("<button type='submit' class='text-button' name='picker' value='all-vehicles' formaction='#vehicles' formnovalidate>Show all vehicles</button>");
+        out.append("</div>");
+        var snapshots = new LinkedHashMap<String,JsonNode>();
+        for (var snapshot : assigned) snapshots.put(value(snapshot,"id"),snapshot);
+        var selectedChoices = new StringBuilder();
+        var matchingChoices = new StringBuilder();
+        int matches = 0;
+        for (var vehicle : fleet) {
             String key = value(vehicle,"id");
-            boolean available = vehicle.path("available").asBoolean();
-            if (assignedIds.contains(key) || (!available && !admin)) continue;
-            vehicleChoice(choices,vehicle,admin,available,available && selected.contains(key));
+            boolean available = snapshots.containsKey(key) || vehicle.path("available").asBoolean();
+            if (!available && !admin) continue;
+            var display = snapshots.getOrDefault(key,vehicle);
+            if (available && selected.contains(key)) {
+                vehicleChoice(selectedChoices,display,admin,true,true);
+            } else if (Vehicles.matchesSearch(vehicle,query)) {
+                vehicleChoice(matchingChoices,display,admin,available,false);
+                matches++;
+            }
         }
-        if (choices.isEmpty()) return admin ? link("Add a vehicle", "/vehicles/new", "text-button") :
-            "<p>No vehicles available for this date.</p>";
-        return "<div class='choices'>" + choices + "</div>";
+        if (!selectedChoices.isEmpty()) out.append("<div><h3>Selected vehicles</h3><div class='choices'>").append(selectedChoices).append("</div></div>");
+        if (!matchingChoices.isEmpty()) {
+            if (!query.isEmpty()) out.append("<h3>Search results (").append(matches).append(")</h3>");
+            out.append("<div class='choices'>").append(matchingChoices).append("</div>");
+        } else if (!query.isEmpty()) {
+            out.append(selectedChoices.isEmpty() ? "<p>No vehicles match this search.</p>" : "<p>No additional vehicles match this search.</p>");
+        } else if (selectedChoices.isEmpty()) out.append("<p>No vehicles available for this date.</p>");
+        return out.toString();
     }
 
     private static void vehicleChoice(StringBuilder out, JsonNode vehicle, boolean admin, boolean available, boolean checked) {
@@ -185,6 +209,8 @@ final class MainlineDailyViews {
         for (var member : selected) submittedRole(req, addedRoles, member.asText());
         var editedRoles = App.JSON.createObjectNode();
         String picker = param(req, "picker");
+        String action = param(req,"action");
+        boolean vehicleDraft = post && (picker.equals("search-vehicles") || picker.equals("all-vehicles") || action.equals("vehicles"));
         String departing = param(req, "departing_id");
         String replacement = param(req, "replacement").strip();
         String replacementRole = param(req, "replacement_role");
@@ -195,7 +221,6 @@ final class MainlineDailyViews {
         var replacements = replacementChoices(candidates);
         if (post && picker.isEmpty()) {
             try {
-                String action = param(req, "action");
                 String version = param(req, "crew_revision");
                 if (action.isEmpty() || action.equals("add")) {
                     Mainline.addMembers(db, user, dailyId, selected, addedRoles, version.isEmpty() ? null : id(version));
@@ -234,12 +259,22 @@ final class MainlineDailyViews {
                     replacements = replacementChoices(candidates);
                     selected.removeAll();
                     editedRoles.removeAll();
+                    vehicleDraft = false;
                     departing = "";
                     replacement = "";
                     replacementRole = "";
                 }
             }
         }
+        if (vehicleDraft && param(req,"crew_revision").isEmpty()) {
+            res.setStatus(409);
+            problem = "Reopen the daily crew to update its vehicles.";
+            vehicleDraft = false;
+        }
+        Set<String> selectedVehicles = new HashSet<>();
+        if (vehicleDraft) selectedVehicles.addAll(params(req,"vehicle"));
+        else for (var vehicle : daily.path("vehicles")) selectedVehicles.add(value(vehicle,"id"));
+        String vehicleRevision = vehicleDraft ? param(req,"crew_revision") : value(daily,"crew_revision");
 
         String title = "Manage crew";
         var form = new StringBuilder("<div class='stack editor'>").append(alert(problem))
@@ -253,8 +288,8 @@ final class MainlineDailyViews {
             .append(contractorPicker(candidates, draft, picker.equals("all") ? "" : param(req, "contractor_search"), admin))
             .append("<div class='actions'><button name='action' value='add'>Add to daily crew</button></div></form>");
         form.append("</section><section class='panel stack' id='vehicles'><h2>Vehicles</h2><form class='stack' method='post'>")
-            .append(hidden("crew_revision",value(daily,"crew_revision")))
-            .append(vehicleChoices(db,value(daily,"date"),daily.path("vehicles"),Set.of(),admin))
+            .append(hidden("crew_revision",vehicleRevision))
+            .append(vehicleChoices(req,db,value(daily,"date"),daily.path("vehicles"),selectedVehicles,admin))
             .append("<div class='actions'><button name='action' value='vehicles'>Save vehicles</button></div></form></section></div>");
         String heading = admin ? MainlineViews.heading(title, backLabel, backPath, "") :
             MainlineViews.workerHeading(title, backLabel, backPath, "");

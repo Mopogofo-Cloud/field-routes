@@ -564,15 +564,18 @@ class HttpApiTest {
 
     private void verifyFleetAccess(String today, long lead, long member, long bookedTruck) throws Exception {
         String form = "application/x-www-form-urlencoded";
-        long first, second;
+        long first, second, renamed;
         try (var db = fixtureDatabase()) {
             var vehicles = App.JSON.createArrayNode()
                 .add(FleetImportTest.vehicle("79301","N/A").put("brand","SyntheticMake").put("model","Rig-A").put("plate_number","VIN-FIRST"))
                 .add(FleetImportTest.vehicle("79302","Rig-B").put("brand","PrivateMake").put("plate_number","VIN-SECOND"))
-                .add(FleetImportTest.vehicle("79303","Rig-B").put("brand","PrivateMake").put("plate_number","VIN-THIRD"));
+                .add(FleetImportTest.vehicle("79303","Rig-B").put("brand","PrivateMake").put("plate_number","VIN-THIRD"))
+                .add(FleetImportTest.vehicle("00984","Crew-804").put("model","F-150").put("plate_number","PRIVATE-804"));
             FleetImport.run(db,vehicles,true);
             first = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='79301'").path("vehicle_id").asLong();
             second = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='79302'").path("vehicle_id").asLong();
+            renamed = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='00984'").path("vehicle_id").asLong();
+            StoreSql.change(db,"UPDATE vehicles SET name='Dispatch pickup' WHERE id=?",renamed);
         }
         String inventory = request("GET","/vehicles",null,null).body();
         for (String id : java.util.List.of("79301","79302","79303")) assertRecordLine(inventory,id);
@@ -612,7 +615,8 @@ class HttpApiTest {
         assertAccessDenied(request("GET","/vehicles",null,null));
         assertAccessDenied(request("GET","/vehicles/" + first,null,null));
         assertAccessDenied(request("POST","/vehicles/" + first,"name=Changed&brand=Bad&plate=BAD",form));
-        String daily = redirectTarget(request("POST",assign,"date=" + today + "&action=create&member=" + member + "&vehicle=" + first,form));
+        String draft = verifyCreateVehicleSearch(assign,today,member,first,renamed,bookedTruck);
+        String daily = redirectTarget(request("POST",assign,draft + "&action=create",form));
         String crew = daily + "/crew";
         String change = "action=vehicles&crew_revision=0&vehicle=";
         assertEquals(409,request("POST",assign,"date=" + today + "&action=create&vehicle=" + first,form).statusCode());
@@ -627,6 +631,8 @@ class HttpApiTest {
         String editor = request("GET",crew,null,null).body();
         assertTrue(editor.contains("Rig-A") && editor.contains("Rig-B"));
         assertFalse(editor.contains("VIN-FIRST") || editor.contains("PrivateMake"));
+        assertRecordLine(stillAssigned,"00984");
+        verifyEditVehicleSearch(crew,daily,first,second,renamed,bookedTruck);
         assertEquals(daily + "?crew=1",redirectTarget(request("POST",crew,change + second,form)));
         assertEquals(409,request("POST",crew,change + first,form).statusCode());
         String updated = request("GET",daily,null,null).body();
@@ -637,12 +643,82 @@ class HttpApiTest {
         login("casey");
         assertAccessDenied(request("GET","/vehicles",null,null));
         assertAccessDenied(request("GET",crew,null,null));
+        String search = "vehicle_search=00984&picker=search-vehicles";
+        assertAccessDenied(request("POST",assign,"date=" + today + "&" + search,form));
+        assertAccessDenied(request("POST",crew,"crew_revision=1&" + search,form));
         assertAccessDenied(request("POST",crew,"action=vehicles&crew_revision=1",form));
         login("admin");
+        String adminResults = vehiclePicker(past + "/crew","crew_revision=0","00984",false);
+        assertTrue(adminResults.contains(vehicleOption(renamed)));
+        assertFalse(adminResults.contains(vehicleOption(first)));
         assertTrue(request("GET","/vehicles/" + second,null,null).body().contains("VIN-SECOND"));
         assertEquals(past + "?crew=1",redirectTarget(request("POST",past + "/crew",change + second,form)));
         assertEquals(daily + "?crew=1",redirectTarget(request("POST",crew,"action=vehicles&crew_revision=1",form)));
         assertFalse(request("GET",daily,null,null).body().contains("Rig-B"));
+    }
+
+    private String vehiclePicker(String path, String draft, String term, boolean showAll) throws Exception {
+        String search = "&vehicle_search=" + java.net.URLEncoder.encode(term,java.nio.charset.StandardCharsets.UTF_8)
+            + "&picker=" + (showAll ? "all-vehicles" : "search-vehicles");
+        var result = request("POST",path,draft + search,"application/x-www-form-urlencoded");
+        assertEquals(200,result.statusCode(),result.body());
+        return result.body();
+    }
+
+    private static String vehicleOption(long vehicle) {
+        return "name='vehicle' value='" + vehicle + "'";
+    }
+
+    private String verifyCreateVehicleSearch(String assign, String today, long member, long first, long renamed,
+                                              long booked) throws Exception {
+        String draft = "date=" + today + "&member=" + member + "&role_" + member + "=Locator";
+        String byCode = vehiclePicker(assign,draft,"eW-80",false);
+        assertTrue(byCode.contains(vehicleOption(renamed)));
+        assertFalse(byCode.contains(vehicleOption(first)));
+        assertTrue(byCode.contains("name='member' value='" + member + "' checked"));
+        assertRolePicker(byCode,member,"Locator");
+
+        String byModel = vehiclePicker(assign,draft,"f150",false);
+        assertTrue(byModel.contains(vehicleOption(renamed)));
+        assertFalse(byModel.contains(vehicleOption(first)));
+        assertFalse(byModel.contains("PRIVATE-804"));
+        assertFalse(vehiclePicker(assign,draft,"PRIVATE-804",false).contains(vehicleOption(renamed)));
+
+        draft += "&vehicle=" + renamed;
+        String byId = vehiclePicker(assign,draft,"79301",false);
+        assertTrue(byId.contains(vehicleOption(renamed) + " checked"));
+        assertTrue(byId.contains(vehicleOption(first)));
+        draft += "&vehicle=" + first;
+        String noMatch = vehiclePicker(assign,draft,"nonexistent",false);
+        assertTrue(noMatch.contains(vehicleOption(renamed) + " checked"));
+        assertTrue(noMatch.contains(vehicleOption(first) + " checked"));
+        String cleared = vehiclePicker(assign,draft,"nonexistent",true);
+        assertTrue(cleared.contains(vehicleOption(renamed) + " checked") && cleared.contains(vehicleOption(first) + " checked"));
+        assertRecordLine(cleared,"79302");
+        assertFalse(cleared.contains(vehicleOption(booked)));
+        try (var db = fixtureDatabase()) {
+            assertEquals(0,StoreSql.one(db,"SELECT count(*) AS n FROM mainline_dailies d JOIN mainline_projects p ON p.id=d.project_id WHERE p.name='Fleet project' AND d.date=?",today).path("n").asInt());
+        }
+        return draft;
+    }
+
+    private void verifyEditVehicleSearch(String crew, String daily, long first, long second, long renamed,
+                                         long booked) throws Exception {
+        // Uncheck the first assigned vehicle, keep the other, then search for a replacement.
+        String draft = "crew_revision=0&vehicle=" + renamed;
+        String byId = vehiclePicker(crew,draft,"79302",false);
+        assertFalse(byId.contains(vehicleOption(first) + " checked"));
+        assertTrue(byId.contains(vehicleOption(renamed) + " checked") && byId.contains(vehicleOption(second)));
+        draft += "&vehicle=" + second;
+        String cleared = vehiclePicker(crew,draft,"79302",true);
+        assertTrue(cleared.contains(vehicleOption(first)));
+        assertFalse(cleared.contains(vehicleOption(first) + " checked"));
+        assertTrue(cleared.contains(vehicleOption(renamed) + " checked") && cleared.contains(vehicleOption(second) + " checked"));
+        assertFalse(vehiclePicker(crew,draft,"Drops-Truck",false).contains(vehicleOption(booked)));
+        String saved = request("GET",daily,null,null).body();
+        assertRecordLine(saved,"79301");
+        assertRecordLine(saved,"00984");
+        assertFalse(saved.contains("79302"),"Searching must not save the replacement");
     }
 
     private static void assertRecordLine(String html, String id) {
