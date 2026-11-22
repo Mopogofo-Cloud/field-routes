@@ -10,13 +10,13 @@ import static fieldops.StoreSql.*;
 final class Vehicles {
     private Vehicles() {}
 
+    static final String SQLITE_COLUMNS = """
+        (id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE,
+         brand TEXT NOT NULL DEFAULT '', plate TEXT NOT NULL DEFAULT '')
+        """;
     static void initialize(Connection db) throws SQLException {
         try (var sql = db.createStatement()) {
-            sql.execute("""
-                CREATE TABLE IF NOT EXISTS vehicles (
-                    id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    brand TEXT NOT NULL DEFAULT '', plate TEXT NOT NULL DEFAULT '')
-                """);
+            sql.execute("CREATE TABLE IF NOT EXISTS vehicles " + SQLITE_COLUMNS);
             sql.execute("""
                 CREATE TABLE IF NOT EXISTS route_vehicles (
                     route_id INTEGER NOT NULL REFERENCES routes, vehicle_id INTEGER NOT NULL REFERENCES vehicles,
@@ -35,8 +35,9 @@ final class Vehicles {
         """;
 
     static ArrayNode list(Connection db, String date, long teamId) throws SQLException {
-        return rows(db, "SELECT v.id,v.name,v.brand,v.plate,CASE WHEN " + BOOKED +
-            " THEN 0 ELSE 1 END AS available FROM vehicles v ORDER BY lower(v.name),v.id", StoreInput.date(date), teamId, date);
+        return rows(db, "SELECT v.id,v.name,v.brand,v.plate,p.source_record_id,CASE WHEN " + BOOKED +
+            " THEN 0 ELSE 1 END AS available FROM vehicles v LEFT JOIN vehicle_source_profiles p ON p.vehicle_id=v.id" +
+            " ORDER BY lower(v.name),v.id", StoreInput.date(date), teamId, date);
     }
 
     static ArrayNode list(Connection db, String date) throws SQLException {
@@ -51,12 +52,17 @@ final class Vehicles {
         String name = StoreInput.text(input, "name", 1, 120);
         String brand = StoreInput.text(input, "brand", 0, 120);
         String plate = StoreInput.text(input, "plate", 0, 80);
-        String duplicate = "A vehicle with that name already exists.";
-        if (id == null) {
-            uniqueChange(db, duplicate, "INSERT INTO vehicles(name,brand,plate) VALUES(?,?,?)", name, brand, plate);
-        } else if (uniqueChange(db, duplicate, "UPDATE vehicles SET name=?,brand=?,plate=? WHERE id=?", name, brand, plate, id) == 0) {
-            throw new Problem(404, "Vehicle not found.");
-        }
+        transaction(db,true,()->{
+            // Source-linked units can share a name and remain distinguishable by their workbook ID.
+            boolean imported = id != null && one(db,"SELECT 1 FROM vehicle_source_profiles WHERE vehicle_id=?",id)!=null;
+            String clash = "SELECT 1 FROM vehicles v LEFT JOIN vehicle_source_profiles p ON p.vehicle_id=v.id WHERE " +
+                nameEquals(db,"v.name") + " AND v.id<>?" + (imported ? " AND p.vehicle_id IS NULL" : "");
+            if (one(db,clash,name,id==null ? -1L : id)!=null) throw new Problem(409,"A vehicle with that name already exists.");
+            if (id==null) change(db,"INSERT INTO vehicles(name,brand,plate) VALUES(?,?,?)",name,brand,plate);
+            else if (change(db,"UPDATE vehicles SET name=?,brand=?,plate=? WHERE id=?",name,brand,plate,id)==0)
+                throw new Problem(404,"Vehicle not found.");
+            return null;
+        });
     }
 
     // Called within the route's write transaction. Multiple routes for the same team can share its truck.

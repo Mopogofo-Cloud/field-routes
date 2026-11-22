@@ -180,7 +180,7 @@ final class TeamRouteWizard {
         for (JsonNode vehicleId : plan.path("vehicle_ids")) {
             JsonNode vehicle = find(vehicles, "id", vehicleId.asText());
             if (vehicle != null && vehicle.path("available").asBoolean()) keep.add(vehicleId);
-            else removed.add(vehicle == null ? "Vehicle #" + vehicleId.asText() : value(vehicle, "name"));
+            else removed.add(vehicle == null ? "Unavailable vehicle" : value(vehicle, "name"));
         }
         plan.set("vehicle_ids", keep);
         return String.join(", ", removed);
@@ -200,21 +200,21 @@ final class TeamRouteWizard {
         if (vehicles.isEmpty())
             return out.append("<p class='helper'>No vehicles registered.</p><a href='/vehicles/new' target='_blank' rel='noopener'>Register a vehicle</a></fieldset>").toString();
         String query = value(plan, "vehicle_search");
-        out.append(search("Find vehicle", "vehicle_search", query, "Unit, brand, plate or VIN", "vehicles"));
+        out.append(search("Find vehicle", "vehicle_search", query, "Unit, record ID, brand, plate or VIN", "vehicles"));
         Set<String> selected = selected(plan.path("vehicle_ids"));
         int count = 0;
         out.append("<div class='choices'>");
         for (JsonNode vehicle : vehicles) {
             String id = value(vehicle, "id"), name = value(vehicle, "name"), brand = value(vehicle, "brand"), plate = value(vehicle, "plate");
             boolean checked = selected.contains(id), available = vehicle.path("available").asBoolean();
-            if (!checked && !matches(query, name + " " + brand + " " + plate)) continue;
+            if (!checked && !matches(query, name + " " + value(vehicle, "source_record_id") + " " + brand + " " + plate)) continue;
             count++;
             out.append("<label><input type='checkbox' name='vehicle' value='").append(h(id)).append("'")
                 .append(checked && available ? " checked" : "").append(available ? "" : " disabled").append("><span>").append(h(name));
             if (!brand.isBlank()) out.append(" · ").append(h(brand));
             if (!plate.isBlank()) out.append(" · ").append(h(plate));
             if (!available) out.append(" · Unavailable");
-            out.append("</span></label>");
+            out.append(vehicleRecordId(vehicle)).append("</span></label>");
         }
         if (count == 0) out.append("<p class='helper'>No vehicles match this search.</p>");
         return out.append("</div></fieldset>").toString();
@@ -282,7 +282,16 @@ final class TeamRouteWizard {
         detail(out, "Team", value(plan, "name"));
         detail(out, "Crew", names(Store.profiles(db), plan.path("member_ids")));
         detail(out, "Contracting entity", entity == null ? "Select an entity" : entityLabel(entity));
-        if (!plan.path("vehicle_ids").isEmpty()) detail(out, "Vehicles", names(vehicles(db, plan, today), plan.path("vehicle_ids")));
+        if (!plan.path("vehicle_ids").isEmpty()) {
+            var choices = vehicles(db, plan, today);
+            var assigned = App.JSON.createArrayNode();
+            for (var id : plan.path("vehicle_ids")) {
+                var vehicle = find(choices, "id", id.asText());
+                if (vehicle == null) assigned.addObject().put("name", "Unavailable vehicle");
+                else assigned.add(vehicle);
+            }
+            out.append("<dt>Vehicles</dt><dd>").append(vehicleList(assigned)).append("</dd>");
+        }
         ArrayNode stops = RouteEntryForm.stops(entry);
         String label = stopLabelTitle(value(entry, "stop_label"));
         if (!label.isEmpty()) detail(out, "Address label", label);

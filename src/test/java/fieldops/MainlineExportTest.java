@@ -37,6 +37,11 @@ class MainlineExportTest {
                 (1,1,'Crew Member',1,'Machine Operator'),(2,1,'Crew Member',0,'Locator')
                 """);
             change(db,"INSERT INTO mainline_daily_members(daily_id,person_id,name,is_driver) VALUES(2,2,'Other Member',0)");
+            FleetImport.run(db,App.JSON.createArrayNode().add(FleetImportTest.vehicle("09012","N/A")),true);
+            long imported = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='09012'")
+                .path("vehicle_id").asLong();
+            long manual = StoreSql.insertId(db,"INSERT INTO vehicles(name) VALUES('Local unit')");
+            Mainline.updateVehicles(db,admin,1,Set.of(imported,manual),0);
             var original = new ByteArrayOutputStream();
             ImageIO.write(new BufferedImage(16,8,BufferedImage.TYPE_INT_RGB),"png",original);
             byte[] bytes = original.toByteArray();
@@ -65,7 +70,11 @@ class MainlineExportTest {
             assertTrue(daily.contains("<v>12.5</v>"));
             var firstCrew = List.of("1","2026-11-01","Crew Member","Yes","Assigned","Machine Operator");
             var crewHeader = List.of("Daily ID","Date","Crew member","Driver","Crew status","Daily role");
-            assertEquals(List.of(crewHeader,firstCrew),crewRows(entries));
+            assertEquals(List.of(crewHeader,firstCrew),sheetRows(entries,3));
+            assertEquals(List.of(
+                List.of("Daily ID","Date","Vehicle","Brand","Plate or VIN","Record ID"),
+                List.of("1","2026-11-01","FORD F150","FORD","","09012"),
+                List.of("1","2026-11-01","Local unit","","","")),sheetRows(entries,4));
             assertTrue(xml(entries,"xl/worksheets/sheet5.xml").contains("<v>120.5"));
             assertTrue(xml(entries,"xl/worksheets/sheet6.xml").contains("Receipts"));
             assertTrue(xml(entries,"xl/worksheets/_rels/sheet6.xml.rels").contains("../drawings/drawing6.xml"));
@@ -77,7 +86,7 @@ class MainlineExportTest {
             MainlineExport.write(out, MainlineExport.load(db,admin,1,null,false), (d,i)->fail("Photos were disabled"));
             entries = unpack(out.toByteArray());
             assertEquals(List.of(crewHeader,List.of("2","2026-11-02","Crew Member","No","Assigned","Locator"),
-                List.of("2","2026-11-02","Other Member","No","Assigned",""),firstCrew),crewRows(entries));
+                List.of("2","2026-11-02","Other Member","No","Assigned",""),firstCrew),sheetRows(entries,3));
             assertTrue(xml(entries,"xl/worksheets/sheet2.xml").contains("Excluded comment"));
             assertFalse(entries.containsKey("xl/drawings/drawing6.xml"));
             assertFalse(xml(entries,"xl/workbook.xml").contains("Images"));
@@ -99,9 +108,9 @@ class MainlineExportTest {
         return result;
     }
 
-    private static List<List<String>> crewRows(Map<String,byte[]> workbook) throws Exception {
+    private static List<List<String>> sheetRows(Map<String,byte[]> workbook,int sheetNumber) throws Exception {
         var sheet = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-            .parse(new ByteArrayInputStream(workbook.get("xl/worksheets/sheet3.xml")));
+            .parse(new ByteArrayInputStream(workbook.get("xl/worksheets/sheet" + sheetNumber + ".xml")));
         var result = new ArrayList<List<String>>();
         var rows = sheet.getElementsByTagName("row");
         for (int i=0; i<rows.getLength(); i++) {

@@ -32,6 +32,7 @@ class PostgresImportTest {
                 sql.execute("INSERT INTO mainline_projects(id,name,supervisor,state) VALUES(1,'Project','Field lead','Not Started')");
                 sql.execute("INSERT INTO mainline_dailies(id,project_id,date) VALUES(1,1,'2026-01-05')");
                 sql.execute("INSERT INTO mainline_daily_members(daily_id,person_id,name) VALUES(1,5,'Field lead')");
+                FleetImportTest.seedLegacyNames(source,19,1);
             }
         }
         try (var fixture = new PostgresTestDatabase()) {
@@ -50,6 +51,11 @@ class PostgresImportTest {
             }
             try (var pg = fixture.open()) { PostgresImport.migrate(file, pg, true); }
             try (var pg = fixture.open()) { PostgresImport.migrate(file, pg, false); }
+            try (var pg = fixture.open()) { FleetImportTest.verifyNormalizedNames(pg,19,1); }
+            try (var source=DriverManager.getConnection("jdbc:sqlite:" + file.toUri().toASCIIString())) {
+                assertTrue(VehicleNameUpgrade.hasOldUniqueName(source));
+                assertEquals("FORD F150 #3",StoreSql.one(source,"SELECT name FROM vehicles WHERE id=3").path("name").asText());
+            }
             try (var pg = fixture.open(); var sql = pg.createStatement()) {
                 try (var result = sql.executeQuery("SELECT supervisor,supervisor_person_id FROM fieldroutes.mainline_projects")) {
                     assertTrue(result.next());

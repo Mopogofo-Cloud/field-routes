@@ -176,10 +176,21 @@ final class Views {
         return id.isEmpty() ? "" : "<p class='helper job-reference'>Job ID · " + h(id) + "</p>";
     }
 
+    static String vehicleRecordId(JsonNode vehicle) {
+        String id = value(vehicle, "source_record_id");
+        return id.isEmpty() ? "" : "<span class='vehicle-record-id'>Record ID " + h(id) + "</span>";
+    }
+
+    static String vehicleList(JsonNode vehicles) {
+        var out = new StringBuilder("<ul class='vehicle-labels'>");
+        for (var vehicle : vehicles) out.append("<li>").append(h(value(vehicle, "name")))
+            .append(vehicleRecordId(vehicle)).append("</li>");
+        return out.append("</ul>").toString();
+    }
+
     static String vehicleLine(JsonNode route) {
-        var names = new java.util.ArrayList<String>();
-        for (var vehicle : route.path("vehicles")) names.add(value(vehicle, "name"));
-        return names.isEmpty() ? "" : "<p class='helper'>Vehicles · " + h(String.join(", ", names)) + "</p>";
+        var vehicles = route.path("vehicles");
+        return vehicles.isEmpty() ? "" : "<div><span class='helper'>Vehicles</span>" + vehicleList(vehicles) + "</div>";
     }
 
     static String mapAddress(String address) {

@@ -131,6 +131,8 @@ final class AdminViews {
                     ObjectNode stored = item(Store.profiles(db), record);
                     for (String key : List.of("wgidig_account_type", "wgidig_employee_id", "wgidig_availability"))
                         data.set(key, stored.get(key));
+                } else if (section == Section.VEHICLES && record != null) {
+                    data.set("source_record_id", item(Vehicles.list(db), record).get("source_record_id"));
                 }
             }
         } else if (!post && record != null) {
@@ -149,6 +151,7 @@ final class AdminViews {
             case PEOPLE -> profileForm(data, record == null, Store.roles(db));
             case ROLES -> field("Role name", "name", value(data, "name"), "required maxlength='120'");
             case VEHICLES -> field("Vehicle name or unit number", "name", value(data, "name"), "required maxlength='120'") +
+                vehicleRecordId(data) +
                 field("Brand", "brand", value(data, "brand"), "maxlength='120'") +
                 field("Plate or VIN", "plate", value(data, "plate"), "maxlength='80'");
             case ITEMS -> field("Item name", "name", value(data, "name"), "required maxlength='250'") +
@@ -439,6 +442,7 @@ final class AdminViews {
                     if (!v.isBlank()) out.append("<br>").append(d[1]).append(" · ").append(d[0].equals("address") ? mapAddress(v) : h(v));
                 }
             } else if (section == Section.VEHICLES) {
+                out.append(vehicleRecordId(row));
                 String details = (value(row, "brand") + " " + value(row, "plate")).strip();
                 if (!details.isEmpty()) out.append(h(details)).append(" · ");
                 out.append(row.path("available").asBoolean() ? "Available today" : "Assigned today");

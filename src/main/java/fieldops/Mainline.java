@@ -362,10 +362,12 @@ final class Mainline {
             if(driver) daily.withArray("driver_ids").add(member.path("id").asLong());
         }
         String vehicleFields = vehicleDetails ? "v.name,v.brand,v.plate" : "v.name";
-        for (var node:rows(db,"SELECT v.daily_id,v.vehicle_id AS id," + vehicleFields
+        for (var node:rows(db,"SELECT v.daily_id,v.vehicle_id AS id,s.source_record_id," + vehicleFields
                 + " FROM mainline_dailies d JOIN mainline_daily_vehicles v ON v.daily_id=d.id"
+                + " LEFT JOIN vehicle_source_profiles s ON s.vehicle_id=v.vehicle_id"
                 + scope + " ORDER BY v.daily_id,lower(v.name),v.vehicle_id",args)) {
             var vehicle=(ObjectNode)node;
+            if (!vehicle.hasNonNull("source_record_id")) vehicle.remove("source_record_id");
             byId.get(vehicle.remove("daily_id").asLong()).withArray("vehicles").add(vehicle);
         }
         return list;

@@ -564,10 +564,32 @@ class HttpApiTest {
 
     private void verifyFleetAccess(String today, long lead, long member, long bookedTruck) throws Exception {
         String form = "application/x-www-form-urlencoded";
-        long first = createFleetVehicle("Rig-A","VIN-FIRST");
-        long second = createFleetVehicle("Rig-B","VIN-SECOND");
-        assertTrue(request("GET","/vehicles/" + first,null,null).body().contains("VIN-FIRST"));
-        assertEquals("VIN-BOOKED",api("GET","/routes",null,200).at("/0/vehicles/0/plate").asText());
+        long first, second;
+        try (var db = fixtureDatabase()) {
+            var vehicles = App.JSON.createArrayNode()
+                .add(FleetImportTest.vehicle("79301","N/A").put("brand","SyntheticMake").put("model","Rig-A").put("plate_number","VIN-FIRST"))
+                .add(FleetImportTest.vehicle("79302","Rig-B").put("brand","PrivateMake").put("plate_number","VIN-SECOND"))
+                .add(FleetImportTest.vehicle("79303","Rig-B").put("brand","PrivateMake").put("plate_number","VIN-THIRD"));
+            FleetImport.run(db,vehicles,true);
+            first = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='79301'").path("vehicle_id").asLong();
+            second = StoreSql.one(db,"SELECT vehicle_id FROM vehicle_source_profiles WHERE source_record_id='79302'").path("vehicle_id").asLong();
+        }
+        String inventory = request("GET","/vehicles",null,null).body();
+        for (String id : java.util.List.of("79301","79302","79303")) assertRecordLine(inventory,id);
+        assertFalse(inventory.contains("Rig-A #79301") || inventory.contains("Rig-B (Record #"));
+        String profile = request("GET","/vehicles/" + first,null,null).body();
+        assertTrue(profile.contains("VIN-FIRST") && profile.contains("value='SyntheticMake Rig-A'"));
+        assertRecordLine(profile,"79301");
+        var booked = api("GET","/routes",null,200).get(0);
+        assertEquals("VIN-BOOKED",booked.at("/vehicles/0/plate").asText());
+        String fleetDate = java.time.LocalDate.parse(today).plusDays(14).toString();
+        long team = booked.path("team_id").asLong();
+        var drops = api("POST", "/routes", """
+            {"team_id":%d,"date":"%s","vehicle_ids":[%d],"addresses":["Fleet label fixture"]}
+            """.formatted(team,fleetDate,first),201).at("/vehicles/0");
+        assertEquals("SyntheticMake Rig-A",drops.path("name").asText());
+        assertEquals("79301",drops.path("source_record_id").asText());
+        assertRecordLine(request("GET","/routes/team/" + team + "?date=" + fleetDate,null,null).body(),"79301");
 
         String supervisor = java.net.URLEncoder.encode("Alex (@alex, #" + lead + ")",java.nio.charset.StandardCharsets.UTF_8);
         String project = redirectTarget(request("POST","/mainline/projects/new",
@@ -584,6 +606,8 @@ class HttpApiTest {
         assertFalse(workerHome.contains("Drops-Truck-34") || workerHome.contains("VIN-BOOKED"));
         String pick = request("GET",assign,null,null).body();
         assertTrue(pick.contains("Rig-A") && pick.contains("Rig-B"));
+        for (String id : java.util.List.of("79301","79302","79303")) assertRecordLine(pick,id);
+        assertFalse(pick.contains("Rig-A #79301") || pick.contains("Rig-B (Record #"));
         assertFalse(pick.contains("VIN-FIRST") || pick.contains("PrivateMake") || pick.contains("name='vehicle' value='" + bookedTruck + "'"));
         assertAccessDenied(request("GET","/vehicles",null,null));
         assertAccessDenied(request("GET","/vehicles/" + first,null,null));
@@ -599,6 +623,7 @@ class HttpApiTest {
         assertEquals(422,request("POST",crew,change + second + "&vehicle=999999",form).statusCode());
         String stillAssigned = request("GET",daily,null,null).body();
         assertTrue(stillAssigned.contains("Rig-A") && stillAssigned.contains("Before fleet change"));
+        assertRecordLine(stillAssigned,"79301");
         String editor = request("GET",crew,null,null).body();
         assertTrue(editor.contains("Rig-A") && editor.contains("Rig-B"));
         assertFalse(editor.contains("VIN-FIRST") || editor.contains("PrivateMake"));
@@ -606,6 +631,8 @@ class HttpApiTest {
         assertEquals(409,request("POST",crew,change + first,form).statusCode());
         String updated = request("GET",daily,null,null).body();
         assertTrue(updated.contains("Rig-B") && updated.contains("Before fleet change") && !updated.contains("Rig-A"));
+        assertRecordLine(updated,"79302");
+        assertFalse(updated.contains("79303"),"The other unit with the same name wasn't assigned");
         assertFalse(updated.contains("VIN-SECOND") || updated.contains("PrivateMake"));
         login("casey");
         assertAccessDenied(request("GET","/vehicles",null,null));
@@ -616,6 +643,11 @@ class HttpApiTest {
         assertEquals(past + "?crew=1",redirectTarget(request("POST",past + "/crew",change + second,form)));
         assertEquals(daily + "?crew=1",redirectTarget(request("POST",crew,"action=vehicles&crew_revision=1",form)));
         assertFalse(request("GET",daily,null,null).body().contains("Rig-B"));
+    }
+
+    private static void assertRecordLine(String html, String id) {
+        assertTrue(java.util.regex.Pattern.compile(">\\s*Record ID:?\\s+" + id + "\\s*</").matcher(html).find(),
+            () -> "Missing separate record ID line for " + id);
     }
 
     private void verifyProjectSupervisor(String today, long alex, long blair, long casey, long devon) throws Exception {

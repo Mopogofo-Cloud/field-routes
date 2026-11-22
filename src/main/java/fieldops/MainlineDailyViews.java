@@ -128,7 +128,7 @@ final class MainlineDailyViews {
             }
         }
         if (!available) out.append(" · Unavailable");
-        out.append("</span></label>");
+        out.append(vehicleRecordId(vehicle)).append("</span></label>");
     }
 
     private static void collectIds(HttpServletRequest req, String field, ArrayNode target) {

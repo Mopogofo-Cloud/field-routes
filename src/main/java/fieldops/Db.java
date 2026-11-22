@@ -231,8 +231,11 @@ final class Db {
             });
             return;
         }
+        try (var config = db.createStatement()) {
+            config.execute("PRAGMA journal_mode=WAL");
+        }
+        VehicleNameUpgrade.upgradeSqlite(db);
         try (var sql = db.createStatement()) {
-            sql.execute("PRAGMA journal_mode=WAL");
             StoreSql.transaction(db, true, () -> {
                 for (var statement : SCHEMA) sql.execute(statement);
                 Vehicles.initialize(db);

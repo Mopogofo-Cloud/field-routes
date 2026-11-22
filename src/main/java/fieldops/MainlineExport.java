@@ -138,9 +138,10 @@ final class MainlineExport {
             }
         }));
         sheets.add(new ExcelWorkbook.Sheet("Vehicles", rows -> {
-            rows.write("Daily ID","Date","Vehicle","Brand","Plate or VIN");
+            rows.write("Daily ID","Date","Vehicle","Brand","Plate or VIN","Record ID");
             for (var d : report.days()) for (var vehicle : d.path("vehicles"))
-                rows.write(d.get("id"),d.get("date"),vehicle.get("name"),vehicle.get("brand"),vehicle.get("plate"));
+                rows.write(d.get("id"),d.get("date"),vehicle.get("name"),vehicle.get("brand"),vehicle.get("plate"),
+                    vehicle.path("source_record_id").asText(""));
         }));
         sheets.add(new ExcelWorkbook.Sheet("Expenses", rows -> {
             rows.write("Daily ID","Date","Expense type","Cost ($)");

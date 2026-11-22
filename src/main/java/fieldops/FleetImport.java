@@ -44,17 +44,23 @@ public final class FleetImport {
     private record Vehicle(String id, String name, String brand, String plate, String vin, JsonNode profile) {}
     record Result(int newVehicles, int matched, int rows) {}
 
-    private static String operational(JsonNode profile, String field) {
+    static String operational(JsonNode profile, String field) {
         String text = profile.get(field).textValue().strip();
         return "N/A".equalsIgnoreCase(text) ? "" : text;
     }
 
     private static String key(String name) { return name.strip().toLowerCase(Locale.ROOT); }
 
+    static String displayName(JsonNode profile) {
+        String code = operational(profile,"company_code");
+        if (!code.isEmpty()) return code;
+        String description = (operational(profile,"brand") + " " + operational(profile,"model")).strip();
+        return description.isEmpty() ? "Vehicle" : description;
+    }
+
     private static Map<String,Vehicle> catalog(JsonNode raw) {
         if (!(raw instanceof ArrayNode array) || array.isEmpty()) throw new IllegalArgumentException("An array of vehicle rows is required.");
         var profiles = new LinkedHashMap<String,ObjectNode>();
-        var codeCounts = new HashMap<String,Integer>();
         for (JsonNode row : array) {
             if (!(row instanceof ObjectNode source)) throw new IllegalArgumentException("Invalid vehicle row.");
             ObjectNode profile = source.deepCopy();
@@ -77,20 +83,14 @@ public final class FleetImport {
                 if (file.size()!=FILE_KEYS.size() || FILE_KEYS.stream().anyMatch(k->!file.path(k).isTextual()))
                     throw new IllegalArgumentException("Invalid attachment entry on vehicle record " + id);
             }
-            codeCounts.merge(key(operational(profile,"company_code")),1,Integer::sum);
         }
         var vehicles = new LinkedHashMap<String,Vehicle>();
-        var names = new HashSet<String>();
         for (var record : profiles.entrySet()) {
             String id = record.getKey();
             var profile = record.getValue();
-            String name = operational(profile,"company_code"), brand = operational(profile,"brand");
-            if (name.isEmpty()) {
-                String description = (brand + " " + operational(profile,"model")).strip();
-                name = (description.isEmpty() ? "Vehicle" : description) + " #" + id;
-            } else if (codeCounts.get(key(name)) > 1) name += " (Record #" + id + ")";
-            if (!names.add(key(name)) || name.length()>120) throw new IllegalArgumentException("Conflicting display name for record " + id);
-            vehicles.put(id,new Vehicle(id,name,brand,operational(profile,"plate_number"),operational(profile,"vin_number"),profile));
+            String name = displayName(profile);
+            if (name.length()>120) throw new IllegalArgumentException("Vehicle name too long for record " + id);
+            vehicles.put(id,new Vehicle(id,name,operational(profile,"brand"),operational(profile,"plate_number"),operational(profile,"vin_number"),profile));
         }
         return vehicles;
     }
@@ -105,10 +105,13 @@ public final class FleetImport {
                 SELECT v.name,v.plate,p.source_record_id,p.source_record
                   FROM vehicles v LEFT JOIN vehicle_source_profiles p ON p.vehicle_id=v.id
                 """)) {
-                localNames.add(key(existing.get("name").asText()));
                 if (existing.hasNonNull("source_record_id")) {
-                    linked.put(existing.get("source_record_id").asText(), App.JSON.readTree(existing.get("source_record").asText()));
+                    var storedSource = App.JSON.readTree(existing.get("source_record").asText());
+                    linked.put(existing.get("source_record_id").asText(),storedSource);
+                    String name=key(existing.get("name").asText());
+                    if (!name.equals(key(displayName(storedSource)))) localNames.add(name);
                 } else {
+                    localNames.add(key(existing.get("name").asText()));
                     String plate = key(existing.get("plate").asText());
                     if (!plate.isEmpty() && !plate.equals("n/a")) unlinkedIdentifiers.add(plate);
                 }

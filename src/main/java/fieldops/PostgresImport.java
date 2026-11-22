@@ -72,6 +72,8 @@ public final class PostgresImport {
     private static void transfer(Connection source, Connection target, boolean copy) throws SQLException {
         var sourceNames = strings(source, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'");
         check(sourceNames.containsAll(Set.of("people", "entities", "routes", "jobs", "photos")), "Source is missing core Field Routes tables.");
+        boolean translateVehicleNames = sourceNames.contains("vehicle_source_profiles") && VehicleNameUpgrade.hasOldUniqueName(source);
+        if (translateVehicleNames) VehicleNameUpgrade.registerNameTranslation(source);
         try (var sql = target.createStatement()) {
             if (copy) {
                 sql.execute("SET LOCAL lock_timeout='15s'");
@@ -111,7 +113,7 @@ public final class PostgresImport {
             long total = 0;
             for (String table : parentTablesFirst(source, sourceNames)) {
                 try {
-                    var columns = columns(source, target, table);
+                    var columns = columns(source, target, table,translateVehicleNames);
                     if (copy) {
                         copyRows(source, target, table, columns);
                         restartIdentities(source, target, table, columns);
@@ -156,7 +158,7 @@ public final class PostgresImport {
         boolean integral() { return Set.of("bigint", "integer", "smallint").contains(type); }
     }
 
-    private static List<Column> columns(Connection source, Connection target, String table) throws SQLException {
+    private static List<Column> columns(Connection source, Connection target, String table, boolean translateVehicleNames) throws SQLException {
         var primaryKeys = new HashMap<String, Integer>();
         try (var stmt = source.createStatement(); var row = stmt.executeQuery("PRAGMA table_info(" + quote(table) + ")")) {
             while (row.next()) primaryKeys.put(row.getString("name"), row.getInt("pk"));
@@ -173,6 +175,8 @@ public final class PostgresImport {
                     String name = rows.getString(1);
                     Integer key = primaryKeys.remove(name);
                     String sourceExpression = quote(name);
+                    if (translateVehicleNames && name.equals("name") && Set.of("vehicles","route_vehicles","mainline_daily_vehicles").contains(table))
+                        sourceExpression = "fleet_clean_name("+(table.equals("vehicles") ? "id" : "vehicle_id")+",name)";
                     // Legacy SQLite projects used display text only. A historical crew assignment was explicit.
                     if (key == null && table.equals("mainline_projects") && name.equals("supervisor_person_id")) {
                         key = 0;

@@ -292,9 +292,12 @@ public final class Store {
         }
         if (admin) {
             for (var node : rows(db, """
-                    SELECT v.route_id,v.vehicle_id AS id,v.name,v.brand,v.plate FROM route_vehicles v JOIN routes r ON r.id=v.route_id
+                    SELECT v.route_id,v.vehicle_id AS id,v.name,v.brand,v.plate,s.source_record_id
+                    FROM route_vehicles v JOIN routes r ON r.id=v.route_id
+                    LEFT JOIN vehicle_source_profiles s ON s.vehicle_id=v.vehicle_id
                     """ + scope + " ORDER BY v.route_id,v.name,v.vehicle_id", args)) {
                 var vehicle = (ObjectNode) node;
+                if (!vehicle.hasNonNull("source_record_id")) vehicle.remove("source_record_id");
                 byRoute.get(vehicle.remove("route_id").asLong()).withArray("vehicles").add(vehicle);
             }
             for (JsonNode node : rows(db, """
